@@ -5,9 +5,9 @@ import com.zaxxer.hikari.HikariDataSource
 
 object Database {
     private val config = HikariConfig().apply {
-        jdbcUrl = System.getenv("DATABASE_URL") ?: "jdbc:postgresql://hackclub.app:5432/immercato_immercato"
-        username = System.getenv("DB_USER") ?: "immercato"
-        password = System.getenv("DB_PASSWORD") ?: "G27K8zNvBA3RALEiadxBG5gJvCQ"
+        jdbcUrl = System.getenv("DATABASE_URL") ?: "jdbc:postgresql:" // URL
+        username = System.getenv("DB_USER") ?: "" // Username
+        password = System.getenv("DB_PASSWORD") ?: "" // password
         driverClassName = "org.postgresql.Driver"
         maximumPoolSize = 10
         idleTimeout = 60000 // Close idle connections after 60 seconds
