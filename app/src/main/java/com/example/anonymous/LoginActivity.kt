@@ -18,7 +18,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -104,7 +104,7 @@ fun QRScannerScreen() {
                         context.startActivity(intent)
                     }
                 ) {
-                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    Icon(imageVector = Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Continue")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(

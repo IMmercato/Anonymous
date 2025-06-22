@@ -13,7 +13,7 @@ interface GraphQLService {
     suspend fun sendMutation(@Body requestBody: GraphQLRequest): Response<String>
 
     companion object {
-        private const val BASE_URL = "https://immercato.hackclub.app"
+        private const val BASE_URL = "https://immercato.hackclub.app/graphql"
 
         fun create(): GraphQLService {
             return Retrofit.Builder()

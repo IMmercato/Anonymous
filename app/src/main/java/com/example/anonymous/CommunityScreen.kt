@@ -26,29 +26,34 @@ import coil.compose.AsyncImage
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
+import com.example.anonymous.datastore.CommunityCustomizationSettings
 
+// A simple data class representing a community.
 data class CommunityInfo(
     val name: String,
     val description: String,
     val members: Int
 )
 
+// Simple model for a Post.
 data class Post(
     val text: String,
     val mediaUrl: String? = null
 )
 
+// Updated CommunityScreen that takes a customization parameter.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CommunityScreen(
     community: CommunityInfo,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    customization: CommunityCustomizationSettings
 ) {
-    var post by remember { mutableStateOf("") }
+    var postText by remember { mutableStateOf("") }
     var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
     var showPostDialog by remember { mutableStateOf(false) }
 
-    // Posts list is maintained as a mutable state list.
+    // For demo purposes, we pre-add some posts.
     val posts = remember {
         mutableStateListOf<Post>().apply {
             add(
@@ -67,8 +72,8 @@ fun CommunityScreen(
         }
     }
 
-    // Create a GIF-enabled ImageLoader as per the recommended approach.
     val context = LocalContext.current
+    // Build an ImageLoader that supports GIFs.
     val gifEnabledLoader = remember {
         ImageLoader.Builder(context)
             .components {
@@ -85,7 +90,6 @@ fun CommunityScreen(
         selectedMediaUri = uri
     }
 
-    // State for the LazyColumn (optional, for further advanced interactions).
     val listState = rememberLazyListState()
 
     Scaffold(
@@ -117,7 +121,7 @@ fun CommunityScreen(
                     .padding(horizontal = 16.dp),
                 contentPadding = PaddingValues(vertical = 16.dp)
             ) {
-                // Sticky header for the CommunityInfo.
+                // Sticky header for community info.
                 stickyHeader {
                     Column(
                         modifier = Modifier
@@ -146,58 +150,57 @@ fun CommunityScreen(
                             .padding(vertical = 4.dp)
                             .clickable { /* Optionally handle post clicks */ },
                         colors = CardDefaults.elevatedCardColors(
-                            containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            containerColor = customization.postCardColor
                         ),
                         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            // Display media if available.
-                            post.mediaUrl?.let { url ->
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(url)
-                                        .crossfade(true)
-                                        .build(),
-                                    imageLoader = gifEnabledLoader,
-                                    contentDescription = "Post media",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(200.dp),
-                                    contentScale = ContentScale.Crop
-                                )
+                            // Only show images if showImages is true.
+                            if (customization.showImages) {
+                                post.mediaUrl?.let { url ->
+                                    AsyncImage(
+                                        model = ImageRequest.Builder(context)
+                                            .data(url)
+                                            .crossfade(true)
+                                            .build(),
+                                        imageLoader = gifEnabledLoader,
+                                        contentDescription = "Post media",
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(200.dp),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
                             }
                             Text(
                                 text = post.text,
                                 modifier = Modifier.padding(16.dp),
-                                fontSize = 16.sp,
+                                fontSize = customization.textSize.sp,
                                 style = MaterialTheme.typography.bodyLarge
                             )
                         }
                     }
                 }
             }
-
             // New post dialog.
             if (showPostDialog) {
                 AlertDialog(
                     onDismissRequest = {
                         showPostDialog = false
-                        post = ""
+                        postText = ""
                         selectedMediaUri = null
                     },
                     title = { Text("New Post") },
                     text = {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            // Text input for the post.
                             TextField(
-                                value = post,
-                                onValueChange = { post = it },
+                                value = postText,
+                                onValueChange = { postText = it },
                                 label = { Text("Enter your post") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth()
                             )
                             Spacer(modifier = Modifier.height(8.dp))
-                            // Button to select an image from the gallery.
                             Button(
                                 onClick = { mediaPickerLauncher.launch("image/*") },
                                 modifier = Modifier.fillMaxWidth()
@@ -205,7 +208,6 @@ fun CommunityScreen(
                                 Text("Select Image")
                             }
                             Spacer(modifier = Modifier.height(8.dp))
-                            // Preview of the selected image.
                             selectedMediaUri?.let { uri ->
                                 AsyncImage(
                                     model = uri,
@@ -221,15 +223,15 @@ fun CommunityScreen(
                     confirmButton = {
                         TextButton(
                             onClick = {
-                                if (post.isNotBlank() || selectedMediaUri != null) {
+                                if (postText.isNotBlank() || selectedMediaUri != null) {
                                     posts.add(
                                         Post(
-                                            text = post,
+                                            text = postText,
                                             mediaUrl = selectedMediaUri?.toString()
                                         )
                                     )
                                     Toast.makeText(context, "Post Added!", Toast.LENGTH_SHORT).show()
-                                    post = ""
+                                    postText = ""
                                     selectedMediaUri = null
                                     showPostDialog = false
                                 }
@@ -242,7 +244,7 @@ fun CommunityScreen(
                         TextButton(
                             onClick = {
                                 showPostDialog = false
-                                post = ""
+                                postText = ""
                                 selectedMediaUri = null
                             }
                         ) {

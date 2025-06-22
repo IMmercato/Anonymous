@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,25 +20,21 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.anonymous.controller.Controller
-import com.example.anonymous.database.Database
-import com.example.anonymous.database.UserData
-import com.example.anonymous.database.UserRepository
-import com.example.anonymous.network.GraphQLRequest
 import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.*
 import android.util.Base64
 import android.view.WindowManager
+import androidx.compose.material.icons.filled.ArrowForward
 import androidx.core.view.WindowCompat
-import com.example.anonymous.network.GraphQLService
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.util.UUID
 
-@OptIn(DelicateCoroutinesApi::class)
 class RegistrationActivity : ComponentActivity() {
-    private lateinit var userRepository: UserRepository
-    private lateinit var graphQLService: GraphQLService
+    // Database and backend references are commented out for now:
+    // private lateinit var userRepository: UserRepository
+    // private lateinit var graphQLService: GraphQLService
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,19 +44,19 @@ class RegistrationActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         )
 
-        // Launch an IO coroutine to initialize your datasource
+        // Commented out the database initialization part:
+        /*
         GlobalScope.launch(Dispatchers.IO) {
             try {
                 val db = Database.dataSource
-                // Now that the datasource is established, you might want to update UI
                 withContext(Dispatchers.Main) {
                     // Update your UI safely here if needed
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                // Optionally, report the error on the main thread.
             }
         }
+        */
 
         setContent {
             AnonymousTheme {
@@ -109,7 +104,7 @@ class RegistrationActivity : ComponentActivity() {
                             context.startActivity(Intent(context, LoginActivity::class.java))
                         }
                     ) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        Icon(Icons.Default.ArrowForward, contentDescription = "Continue to Verify")
                     }
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
@@ -127,7 +122,8 @@ class RegistrationActivity : ComponentActivity() {
 
                             val fingerprint = keyPair?.public?.encoded?.let { getPublicKeyFingerprint(it) } ?: ""
 
-                            registerUserWithBackend(uuidString, publicKeyString)
+                            // Uncomment the following line if you decide to enable backend registration:
+                            // registerUserWithBackend(uuidString, publicKeyString)
 
                             val payload = """{"uuid":"$uuidString", "fp":"$fingerprint"}"""
                             val bitmap = Controller.generateQRCode(payload)
@@ -154,6 +150,8 @@ class RegistrationActivity : ComponentActivity() {
         }
     }
 
+    // Commented out the function that references database calls and backend registration.
+    /*
     fun registerUserWithBackend(uuid: String, publicKey: String) {
         GlobalScope.launch(Dispatchers.IO) {
             try {
@@ -190,6 +188,7 @@ class RegistrationActivity : ComponentActivity() {
             }
         }
     }
+    */
 
     fun generateRSAKeyPair(alias: String = "registration_key"): KeyPair? {
         return try {
