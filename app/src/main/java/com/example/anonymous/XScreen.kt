@@ -7,19 +7,16 @@ import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ThumbUp
@@ -30,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -38,15 +36,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -71,6 +65,7 @@ class VideoPlaybackViewModel(
         return savedStateHandle.get<Long>("playback_position_$videoUrl") ?: 0L
     }
 }
+
 
 @Composable
 fun XScreen(viewModel: VideoPlaybackViewModel = androidx.lifecycle.viewmodel.compose.viewModel(), onSwipeRight: () -> Unit) {
@@ -97,19 +92,17 @@ fun ReelItem(videoUrl: String, viewModel: VideoPlaybackViewModel, onSwipeRight: 
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var playbackPosition by rememberSaveable(videoUrl) {
-        mutableStateOf(viewModel.getPlaybackPosition(videoUrl))
+        mutableLongStateOf(viewModel.getPlaybackPosition(videoUrl))
     }
 
     var isPlaying by remember { mutableStateOf(true) }
     var showLike by remember { mutableStateOf(false) }
-    var centerX by remember { mutableStateOf(0f) }
-    var centerY by remember { mutableStateOf(0f) }
-    var scale by remember { mutableStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
-    val state = rememberTransformableState { zoomChange, panChange, _ ->
-        scale = (scale * zoomChange).coerceIn(1f, 5f)
-        offset += panChange
-    }
+//    var iszooming by remember { mutableStateOf(false) }
+//    var scale by remember { mutableStateOf(1f) }
+//    var offset by remember { mutableStateOf(Offset.Zero) }
+//    val state = rememberTransformableState { zoomChange, _, _ ->
+//        scale = (scale * zoomChange).coerceIn(1f, 5f) // Update scale based on zoom change
+//    }
 
     val exoPlayer = remember(videoUrl) {
         ExoPlayer.Builder(context).build().apply {
@@ -150,27 +143,38 @@ fun ReelItem(videoUrl: String, viewModel: VideoPlaybackViewModel, onSwipeRight: 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            }
-            .pointerInput(Unit) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    //state.onGesture(zoom, pan, 0f)
-                }
-            }
+//            .graphicsLayer {
+//                scaleX = scale
+//                scaleY = scale
+//                translationX = offset.x
+//                translationY = offset.y
+//            }
+//            .pointerInput(state) {
+//                detectTransformGestures { _, _, zoom, _ ->
+//                    iszooming = true
+//                    scale = (scale * zoom).coerceIn(1f, 5f)
+//                }
+//            }
             .pointerInput(Unit) {
                 detectTapGestures (
                     onTap = {
+                        //iszooming = false
                         isPlaying = !isPlaying
                         exoPlayer.playWhenReady = isPlaying
                     },
                     onDoubleTap = {
+                        //iszooming = false
                         showLike = true
                     }
                 )
+            }
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { change, dragAmount ->
+                    if (dragAmount < 0) {
+                        onSwipeRight()
+                    }
+                    change.consume() // Consume the change to prevent further processing
+                }
             }
     ) {
         AndroidView(
@@ -189,20 +193,6 @@ fun ReelItem(videoUrl: String, viewModel: VideoPlaybackViewModel, onSwipeRight: 
             modifier = Modifier.matchParentSize()
         )
 
-        val zoneRadius = 120.dp
-        val boxSizePx = with(LocalDensity.current) { zoneRadius.toPx() * 2 }
-
-        Box(
-            modifier = Modifier
-                .offset {
-                    IntOffset(
-                        (centerX - boxSizePx / 2).toInt(),
-                        (centerY - boxSizePx / 2).toInt()
-                    )
-                }
-                .size(zoneRadius * 2)
-                .background(Color(0x66FF0000), shape = CircleShape)
-        )
 
         Box( modifier = Modifier
             .height(50.dp)
