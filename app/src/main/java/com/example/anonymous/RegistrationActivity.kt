@@ -24,7 +24,9 @@ import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.*
 import android.util.Base64
 import android.view.WindowManager
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.ui.graphics.Color
 import androidx.core.view.WindowCompat
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -144,6 +146,14 @@ class RegistrationActivity : ComponentActivity() {
                         text = "This is your unique identity on Anonymous.\nWe will save a copy on your device – please keep it safe!",
                         fontSize = 10.sp,
                         textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Already have an Identity?",
+                        color = Color.Cyan,
+                        modifier = Modifier.clickable {
+                            context.startActivity(Intent(context, LoginActivity::class.java))
+                        }
                     )
                 }
             }
