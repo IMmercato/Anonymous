@@ -2,5 +2,5 @@ package com.example.anonymous.network
 
 data class GraphQLRequest(
     val query: String,
-    val variables: Map<String, Any?>
+    val variables: Map<String, Any?>? = null
 )

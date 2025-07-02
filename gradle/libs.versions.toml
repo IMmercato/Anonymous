@@ -55,6 +55,7 @@ androidx-media3-transformer-v101 = { module = "androidx.media3:media3-transforme
 apollo-runtime = { module = "com.apollographql.apollo:apollo-runtime", version.ref = "apolloRuntime" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coilCompose" }
 coil-gif = { module = "io.coil-kt:coil-gif", version.ref = "coilCompose" }
+converter-gson = { module = "com.squareup.retrofit2:converter-gson", version.ref = "converterScalars" }
 converter-scalars = { module = "com.squareup.retrofit2:converter-scalars", version.ref = "converterScalars" }
 exposed-core = { module = "org.jetbrains.exposed:exposed-core", version.ref = "exposedJdbc" }
 exposed-jdbc = { module = "org.jetbrains.exposed:exposed-jdbc", version.ref = "exposedJdbc" }
