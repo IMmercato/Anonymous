@@ -127,7 +127,7 @@ fun SettingsScreen() {
             description = "Personalize your community settings",
             onClick = { context.startActivity(Intent(context, CommunityCustomizationActivity::class.java)) }
         )
-        CreateUserButton()
+        //CreateUserButton()
     }
 }
 
@@ -153,7 +153,7 @@ fun SettingsCard(title: String, icon: ImageVector, description: String, onClick:
 }
 
 // User creating by clicking a button and responding with the status of the request
-@Composable
+/*@Composable
 fun CreateUserButton() {
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -180,4 +180,4 @@ fun CreateUserButton() {
     }) {
         Icon(Icons.Default.Check, contentDescription = "Check the connection")
     }
-}
+}*/

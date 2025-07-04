@@ -24,19 +24,20 @@ import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.*
 import android.util.Base64
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.ui.graphics.Color
 import androidx.core.view.WindowCompat
+import com.example.anonymous.network.GraphQLRequest
+import com.example.anonymous.network.GraphQLService
+import com.example.anonymous.network.QueryBuilder
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
 import java.util.UUID
 
 class RegistrationActivity : ComponentActivity() {
-    // Database and backend references are commented out for now:
-    // private lateinit var userRepository: UserRepository
-    // private lateinit var graphQLService: GraphQLService
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,20 +46,6 @@ class RegistrationActivity : ComponentActivity() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         )
-
-        // Commented out the database initialization part:
-        /*
-        GlobalScope.launch(Dispatchers.IO) {
-            try {
-                val db = Database.dataSource
-                withContext(Dispatchers.Main) {
-                    // Update your UI safely here if needed
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-        */
 
         setContent {
             AnonymousTheme {
@@ -78,10 +65,6 @@ class RegistrationActivity : ComponentActivity() {
         LaunchedEffect(Unit) {
             identityBitmap = Controller.checkIdentityExists(context, identityFileName)
         }
-
-        // Only generate a new identity if one does not exist
-        val newUUID = remember { if (identityBitmap == null) UUID.randomUUID() else null }
-        val keyPair = remember { newUUID?.let { generateRSAKeyPair() } }
 
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
             Column(
@@ -117,25 +100,38 @@ class RegistrationActivity : ComponentActivity() {
                 } else {
                     Button(onClick = {
                         coroutineScope.launch {
-                            val uuidString = newUUID.toString()
-                            val publicKeyString = keyPair?.public?.encoded?.let {
+                            val keyPair = generateRSAKeyPair()
+                            val publicKeyBytes = keyPair?.public?.encoded
+                            val publicKeyString = publicKeyBytes?.let {
                                 Base64.encodeToString(it, Base64.NO_WRAP)
-                            } ?: ""
+                            } ?: return@launch
 
-                            val fingerprint = keyPair?.public?.encoded?.let { getPublicKeyFingerprint(it) } ?: ""
+                            val fingerprint = publicKeyBytes.let { getPublicKeyFingerprint(it) }
 
-                            // Uncomment the following line if you decide to enable backend registration:
-                            // registerUserWithBackend(uuidString, publicKeyString)
+                            // 👇 Send publicKey to GraphQL backend and retrieve UUID
+                            val request = GraphQLRequest( query = QueryBuilder.createUser(publicKeyString))
 
-                            val payload = """{"uuid":"$uuidString", "fp":"$fingerprint"}"""
-                            val bitmap = Controller.generateQRCode(payload)
+                            val service = GraphQLService.create()
+                            val response = service.createUser(request)
 
-                            if (bitmap != null) {
-                                withContext(Dispatchers.IO) {
-                                    Controller.saveBitmapToInternalStorage(context, bitmap, identityFileName)
-                                    Controller.saveBitmapToGallery(context, bitmap, identityFileName)
+                            if (response.isSuccessful) {
+                                val uuid = response.body()?.data?.createUser?.id
+                                if (uuid != null) {
+                                    val payload = """{"uuid":"$uuid", "fp":"$fingerprint"}"""
+                                    val bitmap = Controller.generateQRCode(payload)
+
+                                    if (bitmap != null) {
+                                        withContext(Dispatchers.IO) {
+                                            Controller.saveBitmapToInternalStorage(context, bitmap, identityFileName)
+                                            Controller.saveBitmapToGallery(context, bitmap, identityFileName)
+                                        }
+                                        identityBitmap = bitmap
+                                    }
+                                } else {
+                                    Toast.makeText(context, "🚨 Server returned null UUID", Toast.LENGTH_SHORT).show()
                                 }
-                                identityBitmap = bitmap
+                            } else {
+                                Toast.makeText(context, "❌ GraphQL registration failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }) {
@@ -159,46 +155,6 @@ class RegistrationActivity : ComponentActivity() {
             }
         }
     }
-
-    // Commented out the function that references database calls and backend registration.
-    /*
-    fun registerUserWithBackend(uuid: String, publicKey: String) {
-        GlobalScope.launch(Dispatchers.IO) {
-            try {
-                val userData = UserData(id = 0, uuid = uuid)
-                userRepository.createUser(userData)
-
-                val mutation = """
-                    mutation registerUser(${'$'}input: RegisterUserInput!){
-                        registerUser(input: ${'$'}input) {
-                            id
-                            uuid
-                            publicKey
-                        }
-                    }
-                """.trimIndent()
-
-                val variables = mapOf(
-                    "input" to mapOf(
-                        "uuid" to uuid,
-                        "publicKey" to publicKey
-                    )
-                )
-
-                val requestBody = GraphQLRequest(query = mutation, variables = variables)
-
-                val response = graphQLService.sendMutation(requestBody)
-
-                if (!response.isSuccessful) {
-                    println("GraphQL request failed: ${response.errorBody()?.string()}")
-                }
-
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-    }
-    */
 
     fun generateRSAKeyPair(alias: String = "registration_key"): KeyPair? {
         return try {
