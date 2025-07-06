@@ -16,4 +16,10 @@ object QueryBuilder {
             deleteUser(id: "$id")
         }
     """.trimIndent()
+
+    fun checkUser(id: String) = """
+        query{
+            getUser(id: "$id)
+        }
+    """.trimIndent()
 }
