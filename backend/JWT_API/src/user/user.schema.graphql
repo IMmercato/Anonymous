@@ -1,0 +1,17 @@
+scalar DateTime
+
+type User {
+  id: ID!
+  publicKey: String!
+  createdAt: DateTime!
+}
+
+type Query {
+  listUsers: [User!]!
+  getUser(id: ID!): User
+}
+
+type Mutation {
+  createUser(publicKey: String!): User!
+  deleteUser(id: ID!): Boolean!
+}
