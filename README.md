@@ -1,16 +1,16 @@
-# Annonymous  
+# Anonymous  
 A Next-Generation Anonymous Social Network
 
-Annonymous is a social network platform built for users who value privacy above all. Our platform creates a space for individuals to interact, share messages, and exchange media without revealing any personally identifiable information. Every user is represented solely by a unique identifier, ensuring that interactions remain completely decoupled from real-world identities.
+Anonymous is a social network platform built for users who value privacy above all. Our platform creates a space for individuals to interact, share messages, and exchange media without revealing any personally identifiable information. Every user is represented solely by a unique identifier, ensuring that interactions remain completely decoupled from real-world identities.
 
 ## Overview  
-In today’s increasingly connected world, privacy is a precious commodity. Many users feel pressured to share more about themselves than they’d like. Annonymous tackles this challenge by focusing entirely on anonymity and security.
+In today’s increasingly connected world, privacy is a precious commodity. Many users feel pressured to share more about themselves than they’d like. Anonymous tackles this challenge by focusing entirely on anonymity and security.
 
 **Core Objective:**  
 Empower individuals with the freedom to communicate openly while protecting personal identity. By using a system that requires no personal data for registration, users can join and enjoy a social network without compromising their privacy.
 
 **What Sets Us Apart:**  
-Instead of using traditional credentials like usernames and passwords, Annonymous assigns a unique, auto-generated identifier to every user. Enhanced with dynamic, QR code–driven authentication for cross-device access, the system provides a seamless, secure, and entirely anonymous user experience.
+Instead of using traditional credentials like usernames and passwords, Anonymous assigns a unique, auto-generated identifier to every user. Enhanced with dynamic, QR code–driven authentication for cross-device access, the system provides a seamless, secure, and entirely anonymous user experience.
 
 ## Key Features
 
@@ -34,7 +34,7 @@ Instead of using traditional credentials like usernames and passwords, Annonymou
 
 ### 4. Data Security & Minimal Data Collection
 - **Privacy by Design:**  
-  Annonymous is built on a “data minimization” philosophy—no personal data is required or stored, significantly reducing breach risk.
+  Anonymous is built on a “data minimization” philosophy—no personal data is required or stored, significantly reducing breach risk.
 - **End-to-End Encryption:**  
   All communications—whether text messages or media—are secured with robust encryption protocols. Even if intercepted, the data remains indecipherable.
 
@@ -78,7 +78,7 @@ Instead of using traditional credentials like usernames and passwords, Annonymou
 
 #### Clone the Repository
 ```bash
-git clone https://github.com/yourusername/Annonymous.git
+git clone https://github.com/IMmercato/Anonymous.git
 cd Annonymous
 ```
 -**Environment Setup:**
