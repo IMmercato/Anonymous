@@ -2,35 +2,54 @@ package com.example.anonymous
 
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Face
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Outline
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.Density
-import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.example.anonymous.network.GraphQLRequest
-import com.example.anonymous.network.GraphQLService
-import com.example.anonymous.network.QueryBuilder
-import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
-class TrustScoreShape : Shape {
+/*class TrustScoreShape : Shape {
     override fun createOutline(
         size: Size,
         layoutDirection: LayoutDirection,
@@ -45,12 +64,13 @@ class TrustScoreShape : Shape {
         }
         return Outline.Generic(path)
     }
-}
+}*/
 
 @Composable
 fun SettingsScreen() {
     val context = LocalContext.current
     var showTrustScore by remember { mutableStateOf(false) }
+    var trustScore by remember { mutableStateOf(0.72f) }
 
     Column(
         modifier = Modifier
@@ -80,7 +100,22 @@ fun SettingsScreen() {
                 }
                 if (showTrustScore) {
                     Spacer(modifier = Modifier.height(8.dp))
-                    Box(
+
+                    TrustScoreBar(
+                        score = trustScore,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .padding(8.dp),
+                        onClick = {
+                            Toast
+                                .makeText(context, "Trust Score details", Toast.LENGTH_SHORT)
+                                .show()
+                        },
+                        gradientColors = listOf(Color(0xFF1E1F26), Color(0xFF434750), Color(0xFF009B77)),
+                        cornerRadius = 16.dp
+                    )
+                    /*Box(
                         modifier = Modifier
                             .padding(8.dp)
                             .size(200.dp, 50.dp)
@@ -95,7 +130,7 @@ fun SettingsScreen() {
                         }) {
                             Icon(Icons.Default.KeyboardArrowUp, null)
                         }
-                    }
+                    }*/
                 }
             }
         }
@@ -127,7 +162,56 @@ fun SettingsScreen() {
             description = "Personalize your community settings",
             onClick = { context.startActivity(Intent(context, CommunityCustomizationActivity::class.java)) }
         )
-        //CreateUserButton()
+    }
+}
+
+@Composable
+fun TrustScoreBar(
+    score: Float,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit = {},
+    gradientColors: List<Color> = listOf(
+        Color(0xFF1E1F26), Color(0xFF434750), Color(0xFF009B77)
+    ),
+    height: Dp = 24.dp,
+    cornerRadius: Dp = 12.dp
+) {
+    // Animate the fill fraction
+    val animatedFraction by animateFloatAsState(
+        targetValue = score.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 800, easing = FastOutSlowInEasing)
+    )
+
+    Box(
+        modifier = modifier
+            .height(height)
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(cornerRadius))
+            .background(Color.LightGray.copy(alpha = 0.3f))
+            .clickable(
+                onClick = onClick,
+                indication = ripple(bounded = true, radius = height),
+                interactionSource = remember { MutableInteractionSource() }
+            )
+    ) {
+        // Gradient fill
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(animatedFraction)
+                .background(
+                    brush = Brush.horizontalGradient(gradientColors),
+                    shape = RoundedCornerShape(cornerRadius)
+                )
+        )
+
+        // Percentage text
+        Text(
+            text = "${(animatedFraction * 100).roundToInt()}%",
+            modifier = Modifier.align(Alignment.Center),
+            style = MaterialTheme.typography.bodyMedium.copy(color = Color.White),
+            maxLines = 1
+        )
     }
 }
 
@@ -151,33 +235,3 @@ fun SettingsCard(title: String, icon: ImageVector, description: String, onClick:
         }
     }
 }
-
-// User creating by clicking a button and responding with the status of the request
-/*@Composable
-fun CreateUserButton() {
-    val coroutineScope = rememberCoroutineScope()
-    val context = LocalContext.current
-
-    IconButton(onClick = {
-        val request = GraphQLRequest( query = QueryBuilder.createUser("pubKey"))
-
-        coroutineScope.launch {
-            val service = GraphQLService.create()
-            val response = service.createUser(request)
-
-            if (response.isSuccessful) {
-                val user = response.body()?.data?.createUser
-                if (user != null) {
-                    Toast.makeText(context, "✅ Created User: ${user.id}", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(context, "⚠️ No user returned.", Toast.LENGTH_SHORT).show()
-                }
-            } else {
-                val errors = response.body()?.errors
-                Toast.makeText(context, "❌ GraphQL Error: ${errors?.joinToString { it.message }}", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }) {
-        Icon(Icons.Default.Check, contentDescription = "Check the connection")
-    }
-}*/
