@@ -7,13 +7,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -24,248 +24,367 @@ fun HomeScreen(
     onOpenChat: (String) -> Unit,
     onOpenCommunity: (CommunityInfo) -> Unit
 ) {
-    val context = LocalContext.current
-    if (isCommunity) {
-        // Create a list of community objects.
-        val communityList = listOf(
-            CommunityInfo(
-                name = "Anonymous",
-                description = "Community for Anonymous thinkers.",
-                members = 1500
-            ),
-            CommunityInfo(
-                name = "Science",
-                description = "Join the Science community to discuss new discoveries.",
-                members = 2350
-            ),
-            CommunityInfo(
-                name = "Hacking",
-                description = "Discuss cybersecurity, hacking techniques and more.",
-                members = 980
-            ),
-            CommunityInfo(
-                name = "Building",
-                description = "Community of builders, makers, and DIY enthusiasts.",
-                members = 1200
-            )
-        )
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            items(communityList) { community ->
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(150.dp)
-                        .clickable {
-                            // Open the detailed CommunityScreen.
-                            onOpenCommunity(community)
-                        },
-                    colors = CardDefaults.elevatedCardColors(
-                        containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = community.name,
-                                style = MaterialTheme.typography.headlineMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Join the ${community.name} community!",
-                                style = MaterialTheme.typography.bodyLarge,
-                                textAlign = TextAlign.Center,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // Contacts branch.
-        val contactNames = remember {
-            mutableStateMapOf<String, String>().apply {
-                listOf("Si", "No", "Lui", "GianFranco", "Luigi", "Squirty", "GG").forEach {
-                    put(it, it)
-                }
-            }
-        }
-        val expandedItemIndex = remember { mutableStateOf(-1) }
-        val showEditDialog = remember { mutableStateOf(false) }
-        val showDeleteDialog = remember { mutableStateOf(false) }
-        val showReportDialog = remember { mutableStateOf(false) }
-        val currentContact = remember { mutableStateOf("") }
-        val newName = remember { mutableStateOf("") }
+    // Dialog + input state
+    var showNewContactDialog by remember { mutableStateOf(false) }
+    var newContactName by remember { mutableStateOf("") }
 
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(30.dp)
-        ) {
-            itemsIndexed(contactNames.keys.toList()) { index, contact ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(80.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .clickable { onOpenChat(contact) },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.AccountCircle,
-                        contentDescription = null,
-                        modifier = Modifier.size(50.dp)
-                    )
-                    Column(
-                        modifier = Modifier.padding(start = 12.dp)
-                    ) {
-                        Text(
-                            text = contactNames[contact] ?: contact,
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Text(
-                            text = "Hell yeah!",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                        )
-                    }
-                    Spacer(modifier = Modifier.weight(1f))
-                    Box {
-                        IconButton(onClick = {
-                            expandedItemIndex.value =
-                                if (expandedItemIndex.value == index) -1 else index
-                        }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menu")
-                        }
-                        DropdownMenu(
-                            expanded = expandedItemIndex.value == index,
-                            onDismissRequest = { expandedItemIndex.value = -1 }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Edit Name") },
-                                onClick = {
-                                    currentContact.value = contact
-                                    newName.value = contactNames[contact] ?: contact
-                                    showEditDialog.value = true
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Delete Contact") },
-                                onClick = {
-                                    currentContact.value = contact
-                                    showDeleteDialog.value = true
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Report", color = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    currentContact.value = contact
-                                    showReportDialog.value = true
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-        if (showEditDialog.value) {
-            AlertDialog(
-                onDismissRequest = { showEditDialog.value = false },
-                title = { Text("Edit Contact Name") },
-                text = {
-                    Column {
-                        TextField(
-                            value = newName.value,
-                            onValueChange = { newName.value = it }
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        contactNames[currentContact.value] = newName.value
-                        showEditDialog.value = false
-                    }) {
-                        Text("Save")
-                    }
-                },
-                dismissButton = {
-                    Button(onClick = { showEditDialog.value = false }) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
-        if (showDeleteDialog.value) {
-            AlertDialog(
-                onDismissRequest = { showDeleteDialog.value = false },
-                title = { Text("Confirm Delete") },
-                text = { Text("Are you sure you want to delete ${currentContact.value}?") },
-                confirmButton = {
-                    Button(onClick = {
-                        contactNames.remove(currentContact.value)
-                        showDeleteDialog.value = false
-                    }) {
-                        Text("Delete")
-                    }
-                },
-                dismissButton = {
-                    Button(onClick = { showDeleteDialog.value = false }) {
-                        Text("Cancel")
-                    }
-                }
-            )
-        }
-        if (showReportDialog.value) {
-            AlertDialog(
-                onDismissRequest = { showReportDialog.value = false },
-                title = { Text("Confirm Report") },
-                text = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = "Warning Icon",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = currentContact.value,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                    }
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        contactNames[currentContact.value] = "${currentContact.value} Reported"
-                        showReportDialog.value = false
-                    }) {
-                        Text("Report")
-                    }
-                },
-                dismissButton = {
-                    Button(onClick = { showReportDialog.value = false }) {
-                        Text("Cancel")
-                    }
-                }
-            )
+    var showAddCommunityDialog by remember { mutableStateOf(false) }
+    var newCommunityName by remember { mutableStateOf("") }
+    var newCommunityDescription by remember { mutableStateOf("") }
+
+    // Contacts
+    val contactNames = remember {
+        mutableStateMapOf<String, String>().apply {
+            listOf("Si", "No", "Lui", "GianFranco", "Luigi", "Squirty", "GG")
+                .forEach { put(it, it) }
         }
     }
+
+    // Communities (initial + dynamic additions)
+    val communityList = remember {
+        mutableStateListOf(
+            CommunityInfo("Anonymous", "Community for Anonymous thinkers.", 1500),
+            CommunityInfo("Science", "Discuss new discoveries.", 2350),
+            CommunityInfo("Hacking", "Cyber-security & hacking tips.", 980),
+            CommunityInfo("Building", "DIY enthusiasts hub.", 1200)
+        )
+    }
+
+    Scaffold(
+        floatingActionButton = {
+            FloatingActionButton(onClick = {
+                if (isCommunity) showAddCommunityDialog = true
+                else showNewContactDialog = true
+            }) {
+                Icon(Icons.Default.Add, contentDescription = "Add")
+            }
+        }
+    ) { _ ->
+        Box() {
+            if (isCommunity) {
+                CommunityList(communityList, onOpenCommunity)
+            } else {
+                ContactList(contactNames, onOpenChat)
+            }
+        }
+    }
+
+    // Add Contact Dialog
+    if (showNewContactDialog) {
+        NewContactDialog(
+            onAdd = { uuid, friendlyName ->
+                contactNames[uuid] = friendlyName
+            },
+            onDismiss = {
+                showNewContactDialog = false
+            }
+        )
+    }
+
+    //  Add Community Dialog
+    if (showAddCommunityDialog) {
+        ColumnInputDialog(
+            title = "Add Community",
+            firstLabel = "Community Name",
+            firstValue = newCommunityName,
+            onFirstChange = { newCommunityName = it },
+            secondLabel = "Description",
+            secondValue = newCommunityDescription,
+            onSecondChange = { newCommunityDescription = it },
+            onConfirm = {
+                if (newCommunityName.isNotBlank()) {
+                    communityList += CommunityInfo(
+                        name = newCommunityName,
+                        description = newCommunityDescription,
+                        members = 0
+                    )
+                }
+                newCommunityName = ""
+                newCommunityDescription = ""
+                showAddCommunityDialog = false
+            },
+            onDismiss = {
+                newCommunityName = ""
+                newCommunityDescription = ""
+                showAddCommunityDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun CommunityList(
+    communities: List<CommunityInfo>,
+    onOpenCommunity: (CommunityInfo) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        items(communities) { community ->
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(150.dp)
+                    .clickable { onOpenCommunity(community) },
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = community.name,
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = community.description,
+                            style = MaterialTheme.typography.bodyLarge,
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContactList(
+    contacts: Map<String, String>,
+    onOpenChat: (String) -> Unit
+) {
+    var expandedIndex by remember { mutableStateOf(-1) }
+    var showEdit by remember { mutableStateOf(false) }
+    var showDelete by remember { mutableStateOf(false) }
+    var showReport by remember { mutableStateOf(false) }
+    var currentKey by remember { mutableStateOf("") }
+    var tempName by remember { mutableStateOf("") }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        itemsIndexed(contacts.keys.toList()) { idx, key ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenChat(key) }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AccountCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(text = contacts[key] ?: key)
+                    Text(
+                        text = "Hell yeah!",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+
+                // ← FIXED: pass onClick explicitly
+                IconButton(onClick = {
+                    expandedIndex = if (expandedIndex == idx) -1 else idx
+                }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "Menu")
+                }
+
+                DropdownMenu(
+                    expanded = expandedIndex == idx,
+                    onDismissRequest = { expandedIndex = -1 }
+                ) {
+                    // ← FIXED: use named params text + onClick
+                    DropdownMenuItem(
+                        text = { Text("Edit Name") },
+                        onClick = {
+                            currentKey = key
+                            tempName = contacts[key] ?: key
+                            showEdit = true
+                            expandedIndex = -1
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete Contact") },
+                        onClick = {
+                            currentKey = key
+                            showDelete = true
+                            expandedIndex = -1
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Report", color = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            currentKey = key
+                            showReport = true
+                            expandedIndex = -1
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    // Edit Dialog
+    if (showEdit) {
+        SimpleInputDialog(
+            title = "Edit Contact Name",
+            label = "New Name",
+            value = tempName,
+            onValueChange = { tempName = it },
+            onConfirm = {
+                (contacts as MutableMap)[currentKey] = tempName
+                showEdit = false
+            },
+            onDismiss = { showEdit = false }
+        )
+    }
+
+    // Delete Dialog
+    if (showDelete) {
+        ConfirmDialog(
+            title = "Confirm Delete",
+            text = "Delete $currentKey?",
+            onConfirm = {
+                (contacts as MutableMap).remove(currentKey)
+                showDelete = false
+            },
+            onDismiss = { showDelete = false }
+        )
+    }
+
+    // Report Dialog
+    if (showReport) {
+        ConfirmDialog(
+            title = "Report Contact",
+            text = "Report $currentKey?",
+            icon = {
+                Icon(
+                    Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            onConfirm = {
+                (contacts as MutableMap)[currentKey] = "$currentKey Reported"
+                showReport = false
+            },
+            onDismiss = { showReport = false }
+        )
+    }
+}
+
+@Composable
+private fun SimpleInputDialog(
+    title: String,
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            TextField(
+                value = value,
+                onValueChange = onValueChange,
+                label = { Text(label) }
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("OK") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun ColumnInputDialog(
+    title: String,
+    firstLabel: String,
+    firstValue: String,
+    onFirstChange: (String) -> Unit,
+    secondLabel: String,
+    secondValue: String,
+    onSecondChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                TextField(
+                    value = firstValue,
+                    onValueChange = onFirstChange,
+                    label = { Text(firstLabel) }
+                )
+                Spacer(Modifier.height(8.dp))
+                TextField(
+                    value = secondValue,
+                    onValueChange = onSecondChange,
+                    label = { Text(secondLabel) }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Add") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun ConfirmDialog(
+    title: String,
+    text: String,
+    icon: (@Composable () -> Unit)? = null,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                icon?.invoke()
+                if (icon != null) Spacer(Modifier.width(8.dp))
+                Text(text)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("Yes") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("No") }
+        }
+    )
 }

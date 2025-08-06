@@ -64,17 +64,17 @@ import kotlinx.coroutines.launch
 
 // Data model for an individual chat message.
 data class ChatMessageModel(
-    val id: Long = System.currentTimeMillis(), // Unique ID based on timestamp.
+    val id: Long = System.currentTimeMillis(),
     val content: String,
-    val isSent: Boolean  // true for sent messages, false for received.
+    val isSent: Boolean,
+    val isCode: Boolean = false
 )
 
-sealed class Icontype {
-    data class Vector(val icon: ImageVector) : Icontype()
-    data class  Drawable(val resId: Int) : Icontype()
+sealed class IconType(val action: (String) -> String) {
+    data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
+    data class Drawable(val resId: Int, val drawableAction: (String) -> String) : IconType(drawableAction)
 }
 
-// Composable function for the chat screen.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
@@ -83,15 +83,23 @@ fun ChatScreen(
     onBack: () -> Unit
 ) {
     var message by remember { mutableStateOf("") }
+    var isCodeFormat by remember { mutableStateOf(false) }
     val messages = remember { mutableStateListOf(ChatMessageModel(content = "Hi", isSent = false)) }
-    val selecteds = remember { mutableStateOf(setOf<Icontype>()) }
     val coroutineScope = rememberCoroutineScope()
+
     val iconList = listOf(
-        Icontype.Vector(Icons.Default.Favorite),
-        Icontype.Vector(Icons.Default.Face),
-        Icontype.Vector(Icons.Default.PlayArrow),
-        Icontype.Drawable(R.drawable.code_24px)
+        IconType.Vector(Icons.Default.Favorite, { text -> "❤️ $text ❤️" }),
+        IconType.Vector(Icons.Default.Face, { text -> "😊 $text 😊" }),
+        IconType.Vector(Icons.Default.PlayArrow, { text -> "▶️ $text" }),
+        IconType.Drawable(R.drawable.code_24px, { text ->
+            if (text.startsWith("```") && text.endsWith("```")) {
+                text.removeSurrounding("```")
+            } else {
+                "```\n$text\n```"
+            }
+        })
     )
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -117,9 +125,14 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(messages) { msg ->
-                    ChatMessage(message = msg, settings = customizationSettings)
+                    ChatMessage(
+                        message = msg,
+                        settings = customizationSettings,
+                        isCode = msg.isCode
+                    )
                 }
             }
+
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -143,42 +156,49 @@ fun ChatScreen(
                     ) {
                         iconList.forEach { icon ->
                             IconButton(onClick = {
-                                selecteds.value = if (icon in selecteds.value) {
-                                    selecteds.value - icon
-                                } else {
-                                    selecteds.value + icon
+                                message = icon.action(message)
+                                if (icon is IconType.Drawable && icon.resId == R.drawable.code_24px) {
+                                    isCodeFormat = !isCodeFormat
                                 }
                             }) {
                                 when (icon) {
-                                    is Icontype.Vector -> Icon(
+                                    is IconType.Vector -> Icon(
                                         imageVector = icon.icon,
                                         contentDescription = null,
-                                        tint = if (icon in selecteds.value) Color.White else Color.DarkGray
+                                        tint = if (message.contains(icon.icon.name)) Color.White else Color.DarkGray
                                     )
-                                    is Icontype.Drawable -> Icon(
+                                    is IconType.Drawable -> Icon(
                                         painter = painterResource(id = icon.resId),
                                         contentDescription = null,
-                                        tint = if (icon in selecteds.value) Color.White else Color.DarkGray
+                                        tint = if (isCodeFormat) Color.White else Color.DarkGray
                                     )
                                 }
                             }
                         }
                     }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         BasicTextField(
                             value = message,
                             onValueChange = { message = it },
-                            modifier = Modifier.weight(1f).padding(4.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(4.dp)
+                                .background(
+                                    if (isCodeFormat) Color.LightGray.copy(alpha = 0.2f)
+                                    else Color.Transparent,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(8.dp),
                             textStyle = MaterialTheme.typography.bodyMedium.copy(
-                                color = MaterialTheme.colorScheme.onSurface
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontFamily = if (isCodeFormat) MaterialTheme.typography.bodyMedium.fontFamily else null
                             ),
                             decorationBox = { inner ->
                                 Box {
                                     if (message.isEmpty()) {
                                         Text(
-                                            "Type a massage...",
+                                            if (isCodeFormat) "Type your code..." else "Type a message...",
                                             style = MaterialTheme.typography.bodyMedium.copy(
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -188,23 +208,29 @@ fun ChatScreen(
                                 }
                             }
                         )
+
                         Spacer(modifier = Modifier.width(8.dp))
                         IconButton(
                             onClick = {
                                 if (message.isNotBlank()) {
-                                    val sentMessage =
-                                        ChatMessageModel(content = "You: $message", isSent = true)
+                                    val sentMessage = ChatMessageModel(
+                                        content = if (isCodeFormat) message else "You: $message",
+                                        isSent = true,
+                                        isCode = isCodeFormat
+                                    )
                                     messages.add(sentMessage)
 
                                     coroutineScope.launch {
                                         delay(1000)
                                         val reply = ChatMessageModel(
-                                            content = "$contactName: Got it!",
-                                            isSent = false
+                                            content = "$contactName: ${if (isCodeFormat) "Nice code!" else "Got it!"}",
+                                            isSent = false,
+                                            isCode = false
                                         )
                                         messages.add(reply)
                                     }
                                     message = ""
+                                    isCodeFormat = false
                                 }
                             }
                         ) {
@@ -217,9 +243,12 @@ fun ChatScreen(
     }
 }
 
-// Chat bubble composable
 @Composable
-fun ChatMessage(message: ChatMessageModel, settings: ChatCustomizationSettings) {
+fun ChatMessage(
+    message: ChatMessageModel,
+    settings: ChatCustomizationSettings,
+    isCode: Boolean = false
+) {
     val bubbleColor = if (message.isSent) settings.sentBubbleColor else settings.receivedBubbleColor
     val alignment = if (message.isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
 
@@ -244,10 +273,17 @@ fun ChatMessage(message: ChatMessageModel, settings: ChatCustomizationSettings) 
                 Text(
                     text = message.content,
                     style = MaterialTheme.typography.bodyLarge.copy(
-                        color = Color.Black,
-                        fontSize = 14.sp
+                        color = if (isCode) Color.White else Color.Black,
+                        fontSize = if (isCode) 12.sp else 14.sp,
+                        fontFamily = if (isCode) MaterialTheme.typography.bodyMedium.fontFamily else null
                     ),
-                    modifier = Modifier.padding(bottom = 4.dp)
+                    modifier = Modifier
+                        .padding(bottom = 4.dp)
+                        .background(
+                            if (isCode) Color.DarkGray.copy(alpha = 0.8f) else Color.Transparent,
+                            RoundedCornerShape(4.dp)
+                        )
+                        .padding(if (isCode) 8.dp else 0.dp)
                 )
 
                 Row(

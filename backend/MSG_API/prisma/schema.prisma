@@ -1,0 +1,33 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  createdAt     DateTime? @default(now()) @db.Timestamp(6)
+  publicKey     String    @unique
+  lastLoginAt   DataTime?
+  status        String    @default("PENDING")
+}
+
+model Message {
+  id          String   @id @default(uuid())
+  content     String   // Plaintext for moderation (optional)
+  encryptedContent String   // Actual encrypted message
+  sender      User     @relation("sentMessages", fields: [senderId], references: [id])
+  senderId    String
+  receiver    User     @relation("receivedMessages", fields: [receiverId], references: [id])
+  receiverId  String
+  isRead      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([senderId])
+  @@index([receiverId])
+}
