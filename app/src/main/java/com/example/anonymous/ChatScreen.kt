@@ -44,6 +44,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,12 +56,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.anonymous.datastore.ChatCustomizationSettings
+import com.example.anonymous.model.Message
+import com.example.anonymous.repository.MessageRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // Data model for an individual chat message.
 data class ChatMessageModel(
@@ -78,13 +85,18 @@ sealed class IconType(val action: (String) -> String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
+    contactId: String,
     contactName: String,
     customizationSettings: ChatCustomizationSettings,
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
+    val messageRepository = remember { MessageRepository(context) }
+    val messages by messageRepository.getMessagesForContact(contactId)
+        .collectAsState(initial = emptyList())
+
     var message by remember { mutableStateOf("") }
     var isCodeFormat by remember { mutableStateOf(false) }
-    val messages = remember { mutableStateListOf(ChatMessageModel(content = "Hi", isSent = false)) }
     val coroutineScope = rememberCoroutineScope()
 
     val iconList = listOf(
@@ -122,13 +134,14 @@ fun ChatScreen(
         ) {
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                reverseLayout = true
             ) {
-                items(messages) { msg ->
+                items(messages.reversed()) { msg ->
                     ChatMessage(
                         message = msg,
                         settings = customizationSettings,
-                        isCode = msg.isCode
+                        isCode = msg.content.startsWith("```") && msg.content.endsWith("```")
                     )
                 }
             }
@@ -213,24 +226,21 @@ fun ChatScreen(
                         IconButton(
                             onClick = {
                                 if (message.isNotBlank()) {
-                                    val sentMessage = ChatMessageModel(
-                                        content = if (isCodeFormat) message else "You: $message",
-                                        isSent = true,
-                                        isCode = isCodeFormat
+                                    val newMessage = Message(
+                                        id = System.currentTimeMillis().toString(),
+                                        content = message,
+                                        encryptedContent = "", // You'll need to encrypt this
+                                        senderId = "currentUserId", // Replace with actual user ID
+                                        receiverId = contactId,
+                                        timestamp = System.currentTimeMillis(),
+                                        isRead = false
                                     )
-                                    messages.add(sentMessage)
 
                                     coroutineScope.launch {
-                                        delay(1000)
-                                        val reply = ChatMessageModel(
-                                            content = "$contactName: ${if (isCodeFormat) "Nice code!" else "Got it!"}",
-                                            isSent = false,
-                                            isCode = false
-                                        )
-                                        messages.add(reply)
+                                        messageRepository.addMessage(newMessage)
+                                        message = ""
+                                        isCodeFormat = false
                                     }
-                                    message = ""
-                                    isCodeFormat = false
                                 }
                             }
                         ) {
@@ -245,12 +255,13 @@ fun ChatScreen(
 
 @Composable
 fun ChatMessage(
-    message: ChatMessageModel,
+    message: Message,
     settings: ChatCustomizationSettings,
     isCode: Boolean = false
 ) {
-    val bubbleColor = if (message.isSent) settings.sentBubbleColor else settings.receivedBubbleColor
-    val alignment = if (message.isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
+    val isSent = message.senderId == "currentUserId" // Replace with actual user ID check
+    val bubbleColor = if (isSent) settings.sentBubbleColor else settings.receivedBubbleColor
+    val alignment = if (isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
 
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -260,8 +271,8 @@ fun ChatMessage(
             shape = RoundedCornerShape(
                 topStart = 12.dp,
                 topEnd = 12.dp,
-                bottomStart = if (message.isSent) 12.dp else 4.dp,
-                bottomEnd = if (message.isSent) 4.dp else 12.dp
+                bottomStart = if (isSent) 12.dp else 4.dp,
+                bottomEnd = if (isSent) 4.dp else 12.dp
             ),
             color = bubbleColor,
             shadowElevation = 2.dp,
@@ -292,13 +303,14 @@ fun ChatMessage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "00:00",
+                        text = SimpleDateFormat("HH:mm", Locale.getDefault())
+                            .format(Date(message.timestamp)),
                         style = MaterialTheme.typography.bodyMedium.copy(
                             color = Color.Gray,
                             fontSize = 10.sp
                         )
                     )
-                    if (!message.isSent) {
+                    if (!isSent && !message.isRead) {
                         Spacer(modifier = Modifier.width(4.dp))
                         LoadingDots()
                     }

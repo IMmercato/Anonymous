@@ -21,16 +21,20 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.anonymous.controller.Controller
+import com.example.anonymous.model.Contact
+import com.example.anonymous.repository.ContactRepository
+import kotlinx.coroutines.launch
 
 @Composable
 fun NewContactDialog(
-    onAdd: (uuid: String, displayName: String) -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onContactAdded: (Contact) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    val coroutineScope = rememberCoroutineScope()
+    val contactRepository = remember { ContactRepository(context) }
 
-    // Track whether we have camera permission
     var hasPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -38,12 +42,9 @@ fun NewContactDialog(
         )
     }
 
-    // Track the scanned UUID
     var scannedUuid by remember { mutableStateOf<String?>(null) }
-    // Track the contact name input
     var contactName by remember { mutableStateOf("") }
 
-    // Launcher to ask for camera permission
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -53,17 +54,14 @@ fun NewContactDialog(
         }
     }
 
-    // Kick off the request as soon as this dialog appears
     LaunchedEffect(Unit) {
         if (!hasPermission) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
-    // Show the appropriate dialog based on scanning state
     if (hasPermission) {
         if (scannedUuid == null) {
-            // Show scanning dialog
             AlertDialog(
                 onDismissRequest = onDismiss,
                 title = { Text("Scan QR Code") },
@@ -86,7 +84,6 @@ fun NewContactDialog(
                 }
             )
         } else {
-            // Show name input dialog after scanning
             AlertDialog(
                 onDismissRequest = {
                     scannedUuid = null
@@ -108,9 +105,17 @@ fun NewContactDialog(
                     TextButton(
                         onClick = {
                             scannedUuid?.let { uuid ->
-                                onAdd(uuid, contactName)
+                                val newContact = Contact(
+                                    uuid = uuid,
+                                    name = contactName,
+                                    publicKey = "" // You'll need to fetch this from your API
+                                )
+                                coroutineScope.launch {
+                                    contactRepository.addContact(newContact)
+                                    onContactAdded(newContact)
+                                }
+                                onDismiss()
                             }
-                            onDismiss()
                         },
                         enabled = contactName.isNotBlank()
                     ) {

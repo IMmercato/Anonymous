@@ -4,45 +4,35 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.anonymous.model.Contact
+import com.example.anonymous.repository.ContactRepository
+import kotlinx.coroutines.launch
 
 @Composable
 fun HomeScreen(
     isCommunity: Boolean = false,
-    onOpenChat: (String) -> Unit,
+    onOpenChat: (Contact) -> Unit,
     onOpenCommunity: (CommunityInfo) -> Unit
 ) {
-    // Dialog + input state
-    var showNewContactDialog by remember { mutableStateOf(false) }
-    var newContactName by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val contactRepository = remember { ContactRepository(context) }
+    val contacts by contactRepository.getContactsFlow().collectAsState(initial = emptyList())
 
-    var showAddCommunityDialog by remember { mutableStateOf(false) }
-    var newCommunityName by remember { mutableStateOf("") }
-    var newCommunityDescription by remember { mutableStateOf("") }
-
-    // Contacts
-    val contactNames = remember {
-        mutableStateMapOf<String, String>().apply {
-            listOf("Si", "No", "Lui", "GianFranco", "Luigi", "Squirty", "GG")
-                .forEach { put(it, it) }
-        }
-    }
-
-    // Communities (initial + dynamic additions)
     val communityList = remember {
-        mutableStateListOf(
+        listOf(
             CommunityInfo("Anonymous", "Community for Anonymous thinkers.", 1500),
             CommunityInfo("Science", "Discuss new discoveries.", 2350),
             CommunityInfo("Hacking", "Cyber-security & hacking tips.", 980),
@@ -50,63 +40,133 @@ fun HomeScreen(
         )
     }
 
+    var showNewContactDialog by remember { mutableStateOf(false) }
+    var showEditDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    var showReportDialog by remember { mutableStateOf(false) }
+    var currentContact by remember { mutableStateOf<Contact?>(null) }
+    var tempName by remember { mutableStateOf("") }
+
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = {
-                if (isCommunity) showAddCommunityDialog = true
-                else showNewContactDialog = true
+                if (isCommunity) {
+                    // Handle community addition
+                } else {
+                    showNewContactDialog = true
+                }
             }) {
                 Icon(Icons.Default.Add, contentDescription = "Add")
             }
         }
     ) { _ ->
-        Box() {
-            if (isCommunity) {
-                CommunityList(communityList, onOpenCommunity)
-            } else {
-                ContactList(contactNames, onOpenChat)
-            }
+        if (isCommunity) {
+            CommunityList(communities = emptyList(), onOpenCommunity = onOpenCommunity)
+        } else {
+            ContactList(
+                contacts = contacts,
+                onOpenChat = onOpenChat,
+                onEditClick = { contact ->
+                    currentContact = contact
+                    tempName = contact.name
+                    showEditDialog = true
+                },
+                onDeleteClick = { contact ->
+                    currentContact = contact
+                    showDeleteDialog = true
+                },
+                onReportClick = { contact ->
+                    currentContact = contact
+                    showReportDialog = true
+                }
+            )
         }
     }
 
-    // Add Contact Dialog
     if (showNewContactDialog) {
         NewContactDialog(
-            onAdd = { uuid, friendlyName ->
-                contactNames[uuid] = friendlyName
+            onDismiss = { showNewContactDialog = false },
+            onContactAdded = { /* Already handled by flow */ }
+        )
+    }
+
+    if (showEditDialog && currentContact != null) {
+        AlertDialog(
+            onDismissRequest = { showEditDialog = false },
+            title = { Text("Edit Contact") },
+            text = {
+                TextField(
+                    value = tempName,
+                    onValueChange = { tempName = it },
+                    label = { Text("Contact Name") }
+                )
             },
-            onDismiss = {
-                showNewContactDialog = false
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            contactRepository.updateContact(
+                                currentContact!!.copy(name = tempName)
+                            )
+                        }
+                        showEditDialog = false
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditDialog = false }) {
+                    Text("Cancel")
+                }
             }
         )
     }
 
-    //  Add Community Dialog
-    if (showAddCommunityDialog) {
-        ColumnInputDialog(
-            title = "Add Community",
-            firstLabel = "Community Name",
-            firstValue = newCommunityName,
-            onFirstChange = { newCommunityName = it },
-            secondLabel = "Description",
-            secondValue = newCommunityDescription,
-            onSecondChange = { newCommunityDescription = it },
-            onConfirm = {
-                if (newCommunityName.isNotBlank()) {
-                    communityList += CommunityInfo(
-                        name = newCommunityName,
-                        description = newCommunityDescription,
-                        members = 0
-                    )
+    if (showDeleteDialog && currentContact != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteDialog = false },
+            title = { Text("Delete Contact") },
+            text = { Text("Are you sure you want to delete ${currentContact?.name}?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        coroutineScope.launch {
+                            contactRepository.deleteContact(currentContact!!.uuid)
+                        }
+                        showDeleteDialog = false
+                    }
+                ) {
+                    Text("Delete")
                 }
-                newCommunityName = ""
-                newCommunityDescription = ""
-                showAddCommunityDialog = false
             },
-            onDismiss = {
-                newCommunityName = ""
-                newCommunityDescription = ""
-                showAddCommunityDialog = false
+            dismissButton = {
+                TextButton(onClick = { showDeleteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showReportDialog && currentContact != null) {
+        AlertDialog(
+            onDismissRequest = { showReportDialog = false },
+            title = { Text("Report Contact") },
+            text = { Text("Are you sure you want to report ${currentContact?.name}?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        // Handle report logic
+                        showReportDialog = false
+                    }
+                ) {
+                    Text("Report")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showReportDialog = false }) {
+                    Text("Cancel")
+                }
             }
         )
     }
@@ -166,25 +226,21 @@ private fun CommunityList(
 
 @Composable
 private fun ContactList(
-    contacts: Map<String, String>,
-    onOpenChat: (String) -> Unit
+    contacts: List<Contact>,
+    onOpenChat: (Contact) -> Unit,
+    onEditClick: (Contact) -> Unit,
+    onDeleteClick: (Contact) -> Unit,
+    onReportClick: (Contact) -> Unit
 ) {
-    var expandedIndex by remember { mutableStateOf(-1) }
-    var showEdit by remember { mutableStateOf(false) }
-    var showDelete by remember { mutableStateOf(false) }
-    var showReport by remember { mutableStateOf(false) }
-    var currentKey by remember { mutableStateOf("") }
-    var tempName by remember { mutableStateOf("") }
-
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        itemsIndexed(contacts.keys.toList()) { idx, key ->
+        items(contacts) { contact ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onOpenChat(key) }
+                    .clickable { onOpenChat(contact) }
                     .padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -195,103 +251,55 @@ private fun ContactList(
                 )
                 Spacer(Modifier.width(12.dp))
                 Column {
-                    Text(text = contacts[key] ?: key)
+                    Text(text = contact.name)
                     Text(
-                        text = "Hell yeah!",
+                        text = contact.lastMessage ?: "No messages yet",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
                     )
                 }
                 Spacer(Modifier.weight(1f))
 
-                // ← FIXED: pass onClick explicitly
-                IconButton(onClick = {
-                    expandedIndex = if (expandedIndex == idx) -1 else idx
-                }) {
-                    Icon(Icons.Default.MoreVert, contentDescription = "Menu")
-                }
+                Box {
+                    var expanded by remember { mutableStateOf(false) }
+                    IconButton(onClick = { expanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Menu")
+                    }
 
-                DropdownMenu(
-                    expanded = expandedIndex == idx,
-                    onDismissRequest = { expandedIndex = -1 }
-                ) {
-                    // ← FIXED: use named params text + onClick
-                    DropdownMenuItem(
-                        text = { Text("Edit Name") },
-                        onClick = {
-                            currentKey = key
-                            tempName = contacts[key] ?: key
-                            showEdit = true
-                            expandedIndex = -1
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Delete Contact") },
-                        onClick = {
-                            currentKey = key
-                            showDelete = true
-                            expandedIndex = -1
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Report", color = MaterialTheme.colorScheme.error) },
-                        onClick = {
-                            currentKey = key
-                            showReport = true
-                            expandedIndex = -1
-                        }
-                    )
+                    DropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Edit Name") },
+                            onClick = {
+                                onEditClick(contact)
+                                expanded = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete Contact") },
+                            onClick = {
+                                onDeleteClick(contact)
+                                expanded = false
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    "Report",
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            },
+                            onClick = {
+                                onReportClick(contact)
+                                expanded = false
+                            }
+                        )
+                    }
                 }
             }
         }
-    }
-
-    // Edit Dialog
-    if (showEdit) {
-        SimpleInputDialog(
-            title = "Edit Contact Name",
-            label = "New Name",
-            value = tempName,
-            onValueChange = { tempName = it },
-            onConfirm = {
-                (contacts as MutableMap)[currentKey] = tempName
-                showEdit = false
-            },
-            onDismiss = { showEdit = false }
-        )
-    }
-
-    // Delete Dialog
-    if (showDelete) {
-        ConfirmDialog(
-            title = "Confirm Delete",
-            text = "Delete $currentKey?",
-            onConfirm = {
-                (contacts as MutableMap).remove(currentKey)
-                showDelete = false
-            },
-            onDismiss = { showDelete = false }
-        )
-    }
-
-    // Report Dialog
-    if (showReport) {
-        ConfirmDialog(
-            title = "Report Contact",
-            text = "Report $currentKey?",
-            icon = {
-                Icon(
-                    Icons.Default.Warning,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error
-                )
-            },
-            onConfirm = {
-                (contacts as MutableMap)[currentKey] = "$currentKey Reported"
-                showReport = false
-            },
-            onDismiss = { showReport = false }
-        )
     }
 }
 

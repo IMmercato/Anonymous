@@ -13,44 +13,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.BottomAppBar
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
@@ -63,6 +30,7 @@ import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.datastore.CommunityCustomizationSettings
 import com.example.anonymous.datastore.getChatCustomizationSettings
 import com.example.anonymous.datastore.getCommunityCustomizationSettings
+import com.example.anonymous.model.Contact
 import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -70,7 +38,6 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Allow app drawing under system bars.
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.setFlags(
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -89,7 +56,7 @@ class MainActivity : ComponentActivity() {
 fun MainScreen() {
     val context = LocalContext.current
 
-    // Retrieve customization settings from DataStore.
+    // Retrieve customization settings from DataStore
     val chatSettingsFlow = getChatCustomizationSettings(context)
     val chatCustomizationSettings by chatSettingsFlow.collectAsState(
         initial = ChatCustomizationSettings()
@@ -111,18 +78,17 @@ fun MainScreen() {
     var identityBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isIdentityChecked by remember { mutableStateOf(false) }
 
-    // Variables for selecting screens.
-    var selectedContact by remember { mutableStateOf<String?>(null) }
+    // State for navigation
+    var selectedContact by remember { mutableStateOf<Contact?>(null) }
     var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
 
-    // Asynchronous identity check.
+    // Asynchronous identity check
     LaunchedEffect(Unit) {
         identityBitmap = Controller.checkIdentityExists(context, identityFileName)
         isIdentityChecked = true
     }
 
     if (!isIdentityChecked) {
-        // Show a loading indicator until the identity check is complete.
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
@@ -131,7 +97,7 @@ fun MainScreen() {
         }
     } else {
         if (identityBitmap != null) {
-            // User is logged in.
+            // User is logged in
             if (selectedCommunity != null) {
                 CommunityScreen(
                     community = selectedCommunity!!,
@@ -140,7 +106,8 @@ fun MainScreen() {
                 )
             } else if (selectedContact != null) {
                 ChatScreen(
-                    contactName = selectedContact!!,
+                    contactId = selectedContact!!.uuid,
+                    contactName = selectedContact!!.name,
                     customizationSettings = chatCustomizationSettings,
                     onBack = { selectedContact = null }
                 )
@@ -157,7 +124,6 @@ fun MainScreen() {
                                         delay(200)
                                         iconScale = 1f
                                     }
-                                    // Toggle the custom home view.
                                     if (accountIcon == Icons.Default.Person) {
                                         showCustomHome = true
                                         accountIcon = Icons.Default.Face
@@ -255,10 +221,8 @@ fun MainScreen() {
                             Icons.Default.Add -> PubblicScreen()
                             Icons.Default.PlayArrow -> {
                                 if (showingAuthor) {
-                                    // 1) AuthorScreen hijacks the full area, onBack resets the flag
                                     AuthorScreen(onBack = { showingAuthor = false })
                                 } else {
-                                    // 2) XScreen now takes an onSwipeRight lambda
                                     XScreen(onSwipeRight = { showingAuthor = true })
                                 }
                             }
@@ -268,7 +232,6 @@ fun MainScreen() {
                 }
             }
         } else {
-            // No user is logged in; show the registration screen.
             Welcome()
         }
     }
@@ -299,8 +262,6 @@ fun Welcome() {
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-
-        // 1. Centered Anonymous text
         AnimatedVisibility(
             visible = showLogo,
             exit = fadeOut(animationSpec = tween(800)),
@@ -313,7 +274,6 @@ fun Welcome() {
             )
         }
 
-        // 2. Slogan and text at top-start with padding for status bar and start safe area
         Column(
             modifier = Modifier
                 .align(Alignment.TopStart)
@@ -345,7 +305,6 @@ fun Welcome() {
             }
         }
 
-        // 3. Register button at bottom center with padding for navigation bar
         AnimatedVisibility(
             visible = showButton,
             enter = fadeIn(animationSpec = tween(1000)),
