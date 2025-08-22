@@ -5,7 +5,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Resolver('Message')
 export class MessageResolver {
-  constructor(private readonly messageService: MessageService) {}
+  constructor(private readonly messageService: MessageService) { }
 
   @UseGuards(JwtAuthGuard)
   @Mutation('sendMessage')
@@ -13,7 +13,7 @@ export class MessageResolver {
     @Args('receiverId') receiverId: string,
     @Args('content') content: string,
     @Args('encryptedContent') encryptedContent: string,
-    @Context() context,
+    @Context() context: any,
   ) {
     const senderId = context.req.user.uuid;
     return this.messageService.sendMessage(
@@ -28,7 +28,7 @@ export class MessageResolver {
   @Query('getMessages')
   async getMessages(
     @Args('receiverId') receiverId: string,
-    @Context() context,
+    @Context() context: any,
   ) {
     const userId = context.req.user.uuid;
     if (receiverId !== userId) {
@@ -39,16 +39,16 @@ export class MessageResolver {
 
   @UseGuards(JwtAuthGuard)
   @Query('getUnreadMessages')
-  async getUnreadMessages(@Context() context) {
+  async getUnreadMessages(@Context() context: any) {
     const userId = context.req.user.uuid;
     return this.messageService.getUnreadMessages(userId);
   }
-
   @UseGuards(JwtAuthGuard)
   @Mutation('markMessageAsRead')
   async markMessageAsRead(
     @Args('messageId') messageId: string,
-    @Context() context,
+    @Context() context: any,
+
   ) {
     const userId = context.req.user.uuid;
     const message = await this.messageService.getMessageById(messageId);

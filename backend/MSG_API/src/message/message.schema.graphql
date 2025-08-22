@@ -1,0 +1,24 @@
+type Message {
+  id: ID!
+  content: String!
+  encryptedContent: String!
+  sender: User!
+  receiver: User!
+  isRead: Boolean!
+  createdAt: String!
+  updatedAt: String!
+}
+
+extend type Query {
+  getMessages(receiverId: ID!): [Message!]!
+  getUnreadMessages: [Message!]!
+}
+
+extend type Mutation {
+  sendMessage(
+    receiverId: ID!
+    content: String!
+    encryptedContent: String!
+  ): Message!
+  markMessageAsRead(messageId: ID!): Message!
+}
