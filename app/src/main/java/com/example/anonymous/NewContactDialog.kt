@@ -24,6 +24,9 @@ import com.example.anonymous.controller.Controller
 import com.example.anonymous.model.Contact
 import com.example.anonymous.repository.ContactRepository
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 @Composable
 fun NewContactDialog(
@@ -44,6 +47,7 @@ fun NewContactDialog(
 
     var scannedUuid by remember { mutableStateOf<String?>(null) }
     var contactName by remember { mutableStateOf("") }
+    var duplicateError by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -70,8 +74,18 @@ fun NewContactDialog(
                         CameraQrScanner(
                             context = context,
                             lifecycleOwner = lifecycleOwner,
-                            onQrDecoded = { uuid ->
-                                scannedUuid = uuid
+                            onQrDecoded = { text ->
+                                try {
+                                    val jsonElement = Json.parseToJsonElement(text)
+                                    val uuid = jsonElement.jsonObject["uuid"]?.jsonPrimitive?.content
+                                    if (!uuid.isNullOrBlank()) {
+                                        scannedUuid = uuid
+                                    } else {
+                                        onDismiss()
+                                    }
+                                } catch (_: Exception) {
+                                    onDismiss()
+                                }
                             },
                             onError = { onDismiss() }
                         )
@@ -88,33 +102,43 @@ fun NewContactDialog(
                 onDismissRequest = {
                     scannedUuid = null
                     contactName = ""
+                    duplicateError = false
                 },
                 title = { Text("Add Contact") },
                 text = {
                     Column {
-                        Text("Scanned ID: ${scannedUuid}")
+                        Text("Scanned ID: $scannedUuid")
                         Spacer(modifier = Modifier.height(16.dp))
                         TextField(
                             value = contactName,
                             onValueChange = { contactName = it },
                             label = { Text("Contact Name") }
                         )
+                        if (duplicateError) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Contact already exists.", color = androidx.compose.ui.graphics.Color.Red)
+                        }
                     }
                 },
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            scannedUuid?.let { uuid ->
-                                val newContact = Contact(
-                                    uuid = uuid,
-                                    name = contactName,
-                                    publicKey = "" // You'll need to fetch this from your API
-                                )
-                                coroutineScope.launch {
-                                    contactRepository.addContact(newContact)
-                                    onContactAdded(newContact)
+                            coroutineScope.launch {
+                                scannedUuid?.let { uuid ->
+                                    val exists = contactRepository.contactExists(uuid)
+                                    if (!exists) {
+                                        val newContact = Contact(
+                                            uuid = uuid,
+                                            name = contactName,
+                                            publicKey = "" // fetch from API later
+                                        )
+                                        contactRepository.addContact(newContact)
+                                        onContactAdded(newContact)
+                                        onDismiss()
+                                    } else {
+                                        duplicateError = true
+                                    }
                                 }
-                                onDismiss()
                             }
                         },
                         enabled = contactName.isNotBlank()
@@ -127,6 +151,7 @@ fun NewContactDialog(
                         onClick = {
                             scannedUuid = null
                             contactName = ""
+                            duplicateError = false
                         }
                     ) {
                         Text("Cancel")
@@ -144,10 +169,8 @@ private fun CameraQrScanner(
     onQrDecoded: (String) -> Unit,
     onError: () -> Unit
 ) {
-    // Compose wrapper for PreviewView
     val previewView = remember { PreviewView(context) }
 
-    // Launch camera setup once
     LaunchedEffect(Unit) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
@@ -156,7 +179,6 @@ private fun CameraQrScanner(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    // Show the camera preview in Compose
     AndroidView(
         factory = { previewView },
         modifier = Modifier.fillMaxSize()
@@ -169,40 +191,32 @@ private fun bindAnalysisUseCase(
     previewView: PreviewView,
     onQrDecoded: (String) -> Unit
 ) {
-    // 1) Unbind any previous use cases
     cameraProvider.unbindAll()
 
-    // 2) Preview
     val preview = Preview.Builder().build().also {
         it.setSurfaceProvider(previewView.surfaceProvider)
     }
 
-    // 3) ImageAnalysis: backpressure = latest only
     val analyzer = ImageAnalysis.Builder()
         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         .build()
         .also { analysis ->
             analysis.setAnalyzer(ContextCompat.getMainExecutor(previewView.context)) { imageProxy ->
                 try {
-                    // Convert frame to Bitmap
                     val bitmap = Controller.imageProxyToBitmap(imageProxy)
                     if (bitmap != null) {
-                        // Decode QR
                         val text = Controller.decodeQRCodeFromBitmap(bitmap)
                         if (text != null) {
                             onQrDecoded(text)
-                            // once decoded, you may want to unbind to stop camera
                             cameraProvider.unbindAll()
                         }
                     }
-                } catch (e: Exception) {
-                    // swallow or log
+                } catch (_: Exception) {
                 } finally {
                     imageProxy.close()
                 }
             }
         }
 
-    // 4) Bind to lifecycle
     cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analyzer)
 }

@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -47,15 +49,24 @@ import com.example.anonymous.controller.Controller
 import com.example.anonymous.network.GraphQLRequest
 import com.example.anonymous.network.GraphQLService
 import com.example.anonymous.network.QueryBuilder
+import com.example.anonymous.network.model.RegisterUserData
 import com.example.anonymous.ui.theme.AnonymousTheme
+import com.example.anonymous.utils.JwtUtils
+import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.security.KeyPair
 import java.security.KeyPairGenerator
-import java.security.MessageDigest
+import java.util.UUID
 
 class RegistrationActivity : ComponentActivity() {
+
+    companion object {
+        private const val TAG = "RegistrationActivity"
+        private const val KEY_ALIAS_PREFIX = "anonymous_identity_"
+        private const val IDENTITY_FILE_NAME = "qr_identity.png"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,13 +86,21 @@ class RegistrationActivity : ComponentActivity() {
     @Composable
     fun RegistrationScreen() {
         val context = LocalContext.current
-        val identityFileName = "qr_identity.png"
         var identityBitmap by remember { mutableStateOf<Bitmap?>(null) }
+        var isLoading by remember { mutableStateOf(false) }
+        var timeRemaining by remember { mutableStateOf<String?>(null) }
         val coroutineScope = rememberCoroutineScope()
 
-        // Load stored identity (if exists)
+        // Load and validate existing identity
         LaunchedEffect(Unit) {
-            identityBitmap = Controller.checkIdentityExists(context, identityFileName)
+            identityBitmap = Controller.checkValidIdentityExists(context, IDENTITY_FILE_NAME)
+            identityBitmap?.let {
+                val jwt = PrefsHelper.getRegistrationJwt(context)
+                jwt?.let {
+                    val remaining = JwtUtils.getJwtTimeRemaining(jwt)
+                    timeRemaining = JwtUtils.formatTimeRemaining(remaining)
+                }
+            }
         }
 
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -95,13 +114,26 @@ class RegistrationActivity : ComponentActivity() {
             ) {
                 Text("Welcome to Anonymous!", style = MaterialTheme.typography.titleLarge)
                 Spacer(modifier = Modifier.height(16.dp))
+
                 if (identityBitmap != null) {
                     Image(
                         bitmap = identityBitmap!!.asImageBitmap(),
                         contentDescription = "QR Code for your identity",
                         modifier = Modifier.size(256.dp)
                     )
+
+                    timeRemaining?.let { remaining ->
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Expires in: $remaining",
+                            color = if (remaining.contains("seconds")) Color.Red else Color.Green,
+                            fontSize = 12.sp
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
+
+                    // Continue to login button
                     FloatingActionButton(
                         onClick = {
                             context.startActivity(Intent(context, LoginActivity::class.java))
@@ -109,6 +141,24 @@ class RegistrationActivity : ComponentActivity() {
                     ) {
                         Icon(Icons.Default.ArrowForward, contentDescription = "Continue to Verify")
                     }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Re-register button (if JWT is expired or about to expire)
+                    Button(
+                        onClick = {
+                            coroutineScope.launch {
+                                Controller.cleanupAllIdentityData(context, IDENTITY_FILE_NAME)
+                                identityBitmap = null
+                                timeRemaining = null
+                            }
+                        }
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Create New Identity")
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Create New Identity")
+                    }
+
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "Your anonymous identity already exists.\nKeep your QR code safe!",
@@ -116,48 +166,101 @@ class RegistrationActivity : ComponentActivity() {
                         textAlign = TextAlign.Center
                     )
                 } else {
-                    Button(onClick = {
-                        coroutineScope.launch {
-                            val keyPair = generateRSAKeyPair()
-                            val publicKeyBytes = keyPair?.public?.encoded
-                            val publicKeyString = publicKeyBytes?.let {
-                                Base64.encodeToString(it, Base64.NO_WRAP)
-                            } ?: return@launch
+                    Button(
+                        onClick = {
+                            if (isLoading) return@Button
+                            isLoading = true
 
-                            val fingerprint = publicKeyBytes.let { getPublicKeyFingerprint(it) }
+                            coroutineScope.launch {
+                                try {
+                                    // Generate RSA key pair
+                                    val keyAlias = KEY_ALIAS_PREFIX + UUID.randomUUID().toString()
+                                    val keyPair = generateRSAKeyPair(keyAlias)
+                                    val publicKeyBytes = keyPair?.public?.encoded
+                                    val publicKeyString = publicKeyBytes?.let {
+                                        Base64.encodeToString(it, Base64.NO_WRAP)
+                                    } ?: throw Exception("Failed to generate key pair")
 
-                            // 👇 Send publicKey to GraphQL backend and retrieve UUID
-                            val request = GraphQLRequest( query = QueryBuilder.createUser(publicKeyString))
+                                    Log.d(TAG, "Generated public key: ${publicKeyString.take(50)}...")
+                                    Log.d(TAG, "Using key alias: $keyAlias")
 
-                            val service = GraphQLService.create()
-                            val response = service.createUser(request)
+                                    // Register with server
+                                    val request = GraphQLRequest(
+                                        query = QueryBuilder.registerUser(publicKeyString)
+                                    )
 
-                            if (response.isSuccessful) {
-                                val uuid = response.body()?.data?.createUser?.id
-                                if (uuid != null) {
-                                    val payload = """{"uuid":"$uuid", "fp":"$fingerprint"}"""
-                                    val bitmap = Controller.generateQRCode(payload)
+                                    val service = GraphQLService.create()
+                                    val response = service.registerUser(request)
 
-                                    if (bitmap != null) {
-                                        withContext(Dispatchers.IO) {
-                                            Controller.saveBitmapToInternalStorage(context, bitmap, identityFileName)
-                                            Controller.saveBitmapToGallery(context, bitmap, identityFileName)
+                                    if (response.isSuccessful) {
+                                        val authPayload = response.body()?.data?.registerUser
+                                        if (authPayload != null && authPayload.jwt.isNotEmpty()) {
+                                            Log.d(TAG, "Received JWT successfully")
+
+                                            // Validate JWT before proceeding
+                                            if (!JwtUtils.isJwtValid(authPayload.jwt)) {
+                                                throw Exception("Server returned invalid JWT")
+                                            }
+
+                                            // Generate QR code with JWT
+                                            val bitmap = Controller.generateQRCode(authPayload.jwt)
+
+                                            if (bitmap != null) {
+                                                withContext(Dispatchers.IO) {
+                                                    // Save key alias and JWT to SharedPreferences
+                                                    PrefsHelper.saveKeyAlias(context, keyAlias)
+                                                    PrefsHelper.saveRegistrationJwt(context, authPayload.jwt)
+
+                                                    // Save QR code with validation
+                                                    Controller.saveBitmapToInternalStorage(
+                                                        context,
+                                                        bitmap,
+                                                        IDENTITY_FILE_NAME
+                                                    )
+                                                    Controller.saveBitmapToGallery(
+                                                        context,
+                                                        bitmap,
+                                                        IDENTITY_FILE_NAME
+                                                    )
+                                                }
+                                                identityBitmap = bitmap
+                                                val remaining = JwtUtils.getJwtTimeRemaining(authPayload.jwt)
+                                                timeRemaining = JwtUtils.formatTimeRemaining(remaining)
+
+                                                Toast.makeText(
+                                                    context,
+                                                    "✅ Registration successful!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        } else {
+                                            throw Exception("Server returned invalid response")
                                         }
-                                        identityBitmap = bitmap
+                                    } else {
+                                        val errorBody = response.errorBody()?.string()
+                                        Log.e(TAG, "Registration failed: $errorBody")
+                                        throw Exception("Registration failed: ${errorBody ?: "Unknown error"}")
                                     }
-                                } else {
-                                    Toast.makeText(context, "🚨 Server returned null UUID", Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error during registration", e)
+                                    Toast.makeText(
+                                        context,
+                                        "❌ Registration error: ${e.message}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } finally {
+                                    isLoading = false
                                 }
-                            } else {
-                                Toast.makeText(context, "❌ GraphQL registration failed: ${response.errorBody()?.string()}", Toast.LENGTH_SHORT).show()
                             }
-                        }
-                    }) {
-                        Text("Be Anonymous!")
+                        },
+                        enabled = !isLoading
+                    ) {
+                        Text(if (isLoading) "Creating identity..." else "Be Anonymous!")
                     }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "This is your unique identity on Anonymous.\nWe will save a copy on your device – please keep it safe!",
+                        text = "This will create your unique anonymous identity.\nYour private key stays on your device - never shared!",
                         fontSize = 10.sp,
                         textAlign = TextAlign.Center
                     )
@@ -174,7 +277,7 @@ class RegistrationActivity : ComponentActivity() {
         }
     }
 
-    fun generateRSAKeyPair(alias: String = "registration_key"): KeyPair? {
+    private fun generateRSAKeyPair(alias: String): KeyPair? {
         return try {
             val keyPairGenerator = KeyPairGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_RSA,
@@ -183,22 +286,19 @@ class RegistrationActivity : ComponentActivity() {
 
             val spec = KeyGenParameterSpec.Builder(
                 alias,
-                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_ENCRYPT
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
             )
                 .setDigests(KeyProperties.DIGEST_SHA256)
                 .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                .setKeySize(2048)
+                .setUserAuthenticationRequired(false)
                 .build()
 
             keyPairGenerator.initialize(spec)
             keyPairGenerator.generateKeyPair()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Key generation failed", e)
             null
         }
-    }
-
-    fun getPublicKeyFingerprint(publicKey: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(publicKey)
-        return digest.joinToString("") { "%02x".format(it) }
     }
 }

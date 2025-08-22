@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlinx.serialization)
 }
 
 android {
@@ -65,6 +66,8 @@ dependencies {
     implementation(libs.graphql.kotlin.ktor.server)
     implementation(libs.apollo.runtime)
     implementation(libs.retrofit)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
     implementation(libs.exposed.jdbc)
     implementation(libs.postgresql)

@@ -1,9 +1,17 @@
 package com.example.anonymous.network
 
 object QueryBuilder {
-    fun createUser(pubKey : String) = """
+    fun registerUser(publicKey: String) = """
+        mutation {
+            registerUser(publicKey: "$publicKey") {
+                jwt
+            }
+        }
+    """.trimIndent()
+
+    fun createUser(publicKey: String) = """
         mutation{
-            createUser(publicKey: "$pubKey") {
+            createUser(publicKey: "$publicKey") {
                 id
                 publicKey
                 createdAt
@@ -19,7 +27,23 @@ object QueryBuilder {
 
     fun checkUser(id: String) = """
         query{
-            getUser(id: "$id)
+            getUser(id: "$id")
+        }
+    """.trimIndent()
+
+    fun loginWithJwt(jwt: String) = """
+        mutation {
+            loginWithJwt(jwt: "$jwt") {
+                nonce
+            }
+        }
+    """.trimIndent()
+
+    fun completeLogin(uuid: String, signature: String) = """
+        mutation {
+            completeLogin(uuid: "$uuid", signature: "$signature") {
+                token
+            }
         }
     """.trimIndent()
 }

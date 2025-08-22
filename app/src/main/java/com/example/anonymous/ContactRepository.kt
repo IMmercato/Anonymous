@@ -40,6 +40,10 @@ class ContactRepository(private val context: Context) {
         }
     }
 
+    suspend fun contactExists(uuid: String): Boolean {
+        return getAllContacts().any { it.uuid == uuid }
+    }
+
     fun getContactsFlow(): Flow<List<Contact>> {
         return context.contactsDataStore.data.map { preferences ->
             preferences[CONTACTS_KEY]?.let { jsonString ->

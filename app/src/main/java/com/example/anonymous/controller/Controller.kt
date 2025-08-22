@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import com.example.anonymous.utils.JwtUtils
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.EncodeHintType
 import com.google.zxing.NotFoundException
@@ -26,7 +27,6 @@ import java.io.FileOutputStream
 object Controller {
     private const val TAG = "Controller"
 
-    // Check if the user has an existing QR identity.
     fun checkIdentityExists(context: Context, identityFileName: String): Bitmap? {
         val identityFile = File(context.filesDir, identityFileName)
         return if (identityFile.exists()) {
@@ -38,8 +38,62 @@ object Controller {
         }
     }
 
-    // Generate a QR code.
+    // Check if the user has a valid existing QR identity
+    fun checkValidIdentityExists(context: Context, identityFileName: String): Bitmap? {
+        val identityFile = File(context.filesDir, identityFileName)
+        if (!identityFile.exists()) {
+            Log.d(TAG, "No identity file found.")
+            return null
+        }
+
+        val bitmap = BitmapFactory.decodeFile(identityFile.absolutePath)
+        if (bitmap == null) {
+            Log.d(TAG, "Failed to decode identity bitmap.")
+            return null
+        }
+
+        // Extract JWT from QR code and validate it
+        val jwt = decodeQRCodeFromBitmap(bitmap)
+        if (jwt == null || !JwtUtils.isJwtValid(jwt)) {
+            Log.d(TAG, "QR code contains invalid or expired JWT. Cleaning up...")
+            cleanupInvalidIdentity(context, identityFileName)
+            return null
+        }
+
+        Log.d(TAG, "Valid identity exists.")
+        return bitmap
+    }
+
+    // Cleanup invalid identity files
+    private fun cleanupInvalidIdentity(context: Context, identityFileName: String) {
+        try {
+            // Delete internal storage file
+            val identityFile = File(context.filesDir, identityFileName)
+            if (identityFile.exists()) {
+                identityFile.delete()
+                Log.d(TAG, "Deleted invalid identity file from internal storage.")
+            }
+
+            // Clear stored preferences
+            val prefs = context.getSharedPreferences("anonymous_prefs", Context.MODE_PRIVATE)
+            prefs.edit().remove("key_alias").remove("registration_jwt").apply()
+            Log.d(TAG, "Cleared invalid identity from preferences.")
+
+            // TODO: Optionally notify server to cleanup user data
+            // This would require additional API call
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during identity cleanup", e)
+        }
+    }
+
+    // Generate a QR code with validation
     fun generateQRCode(content: String, width: Int = 512, height: Int = 512): Bitmap? {
+        if (content.length > 2000) {
+            Log.e(TAG, "QR code content too long: ${content.length} characters")
+            return null
+        }
+
         return try {
             val hints = hashMapOf<EncodeHintType, Int>().apply {
                 put(EncodeHintType.MARGIN, 1)
@@ -58,14 +112,21 @@ object Controller {
         }
     }
 
-    // Save QR code to internal storage.
+    // Save QR code to internal storage with validation
     fun saveBitmapToInternalStorage(context: Context, bitmap: Bitmap, fileName: String): File? {
         return try {
+            // Validate the QR content before saving
+            val jwt = decodeQRCodeFromBitmap(bitmap)
+            if (jwt == null || !JwtUtils.isJwtValid(jwt)) {
+                Log.e(TAG, "Cannot save invalid JWT QR code")
+                return null
+            }
+
             val imageFile = File(context.filesDir, fileName)
             FileOutputStream(imageFile).use { fos ->
                 bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
             }
-            Log.d(TAG, "Saved QR code to internal storage.")
+            Log.d(TAG, "Saved valid QR code to internal storage.")
             imageFile
         } catch (e: Exception) {
             Log.e(TAG, "Error saving QR code internally.", e)
@@ -73,9 +134,16 @@ object Controller {
         }
     }
 
-    // Save QR code to the gallery.
+    // Save QR code to the gallery with validation
     fun saveBitmapToGallery(context: Context, bitmap: Bitmap, fileName: String): Uri? {
         return try {
+            // Validate the QR content before saving
+            val jwt = decodeQRCodeFromBitmap(bitmap)
+            if (jwt == null || !JwtUtils.isJwtValid(jwt)) {
+                Log.e(TAG, "Cannot save invalid JWT QR code to gallery")
+                return null
+            }
+
             val resolver = context.contentResolver
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
@@ -90,7 +158,7 @@ object Controller {
                     bitmap.compress(Bitmap.CompressFormat.PNG, 100, os)
                 }
             }
-            Log.d(TAG, "Saved QR code to gallery.")
+            Log.d(TAG, "Saved valid QR code to gallery.")
             imageUri
         } catch (e: Exception) {
             Log.e(TAG, "Error saving QR code to gallery.", e)
@@ -98,7 +166,7 @@ object Controller {
         }
     }
 
-    // Decode QR code from bitmap.
+    // Decode QR code from bitmap with enhanced validation
     fun decodeQRCodeFromBitmap(bitmap: Bitmap): String? {
         return try {
             val width = bitmap.width
@@ -110,13 +178,25 @@ object Controller {
             val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
             val qrReader = QRCodeReader()
             val result = qrReader.decode(binaryBitmap)
-            Log.d(TAG, "Decoded QR code successfully: ${result.text}")
-            result.text
+
+            val decodedText = result.text
+            Log.d(TAG, "Decoded QR code: ${decodedText.take(50)}...")
+
+            // Basic JWT format validation
+            if (decodedText.split('.').size != 3) {
+                Log.e(TAG, "Decoded text is not a valid JWT format")
+                return null
+            }
+
+            decodedText
         } catch (e: NotFoundException) {
-            Log.e(TAG, "QR Code not found")
+            Log.e(TAG, "QR Code not found in image")
             null
         } catch (e: ReaderException) {
             Log.e(TAG, "QR code decoding failed.", e)
+            null
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected error during QR decoding", e)
             null
         }
     }
@@ -150,13 +230,35 @@ object Controller {
         }
     }
 
-    // Gallery selection: convert a given URI to Bitmap.
+    // Gallery selection: convert a given URI to Bitmap
     fun uriToBitmap(context: Context, uri: Uri): Bitmap? {
         return try {
             MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error converting URI to bitmap", e)
             null
+        }
+    }
+
+    // Cleanup all identity data (for logout or re-registration)
+    fun cleanupAllIdentityData(context: Context, identityFileName: String) {
+        try {
+            // Delete internal storage file
+            val identityFile = File(context.filesDir, identityFileName)
+            if (identityFile.exists()) {
+                identityFile.delete()
+                Log.d(TAG, "Deleted identity file from internal storage.")
+            }
+
+            // Clear all stored preferences
+            val prefs = context.getSharedPreferences("anonymous_prefs", Context.MODE_PRIVATE)
+            prefs.edit().clear().apply()
+            Log.d(TAG, "Cleared all identity preferences.")
+
+            // TODO: Optionally delete from gallery (more complex due to content provider permissions)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during complete identity cleanup", e)
         }
     }
 }
