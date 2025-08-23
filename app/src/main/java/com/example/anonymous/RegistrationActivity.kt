@@ -51,6 +51,7 @@ import com.example.anonymous.network.GraphQLService
 import com.example.anonymous.network.QueryBuilder
 import com.example.anonymous.network.model.RegisterUserData
 import com.example.anonymous.ui.theme.AnonymousTheme
+import com.example.anonymous.utils.CryptoUtils
 import com.example.anonymous.utils.JwtUtils
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.Dispatchers
@@ -176,12 +177,16 @@ class RegistrationActivity : ComponentActivity() {
                                     // Generate RSA key pair
                                     val keyAlias = KEY_ALIAS_PREFIX + UUID.randomUUID().toString()
                                     val keyPair = generateRSAKeyPair(keyAlias)
-                                    val publicKeyBytes = keyPair?.public?.encoded
-                                    val publicKeyString = publicKeyBytes?.let {
-                                        Base64.encodeToString(it, Base64.NO_WRAP)
-                                    } ?: throw Exception("Failed to generate key pair")
 
-                                    Log.d(TAG, "Generated public key: ${publicKeyString.take(50)}...")
+                                    val publicKey = keyPair?.public
+                                    if (publicKey == null) {
+                                        throw Exception("Failed to generate key pair")
+                                    }
+
+                                    // Convert public key to SPKI format (X.509 SubjectPublicKeyInfo)
+                                    val publicKeyString = CryptoUtils.convertToSpkiFormat(publicKey)
+
+                                    Log.d(TAG, "Generated public key (SPKI): ${publicKeyString.take(50)}...")
                                     Log.d(TAG, "Using key alias: $keyAlias")
 
                                     // Register with server
