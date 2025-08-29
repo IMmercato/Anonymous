@@ -30,7 +30,7 @@ import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.datastore.CommunityCustomizationSettings
 import com.example.anonymous.datastore.getChatCustomizationSettings
 import com.example.anonymous.datastore.getCommunityCustomizationSettings
-import com.example.anonymous.model.Contact
+import com.example.anonymous.network.model.Contact
 import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

@@ -1,4 +1,4 @@
-package com.example.anonymous.model
+package com.example.anonymous.network.model
 
 import kotlinx.serialization.Serializable
 

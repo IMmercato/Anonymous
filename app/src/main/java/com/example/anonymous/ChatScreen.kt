@@ -1,5 +1,6 @@
 package com.example.anonymous
 
+import android.util.Log
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -44,9 +46,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,9 +63,12 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.anonymous.datastore.ChatCustomizationSettings
-import com.example.anonymous.model.Message
+import com.example.anonymous.network.GraphQLMessageService
+import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.MessageRepository
+import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -92,10 +97,13 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val messageRepository = remember { MessageRepository(context) }
-    val messages by messageRepository.getMessagesForContact(contactId)
-        .collectAsState(initial = emptyList())
+    val messageService = remember { GraphQLMessageService(context) }
+//    val messages by messageRepository.getMessagesForContact(contactId)
+//        .collectAsState(initial = emptyList())
 
+    var messages by remember { mutableStateOf(emptyList<Message>()) }
     var message by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
@@ -111,6 +119,46 @@ fun ChatScreen(
             }
         })
     )
+
+    // Load messages on start
+    LaunchedEffect(contactId) {
+        // Load from local database first
+        val localMessages = messageRepository.getMessagesForContact(contactId)
+            .firstOrNull() ?: emptyList()
+        messages = localMessages
+
+        // Then try to refresh from server
+        coroutineScope.launch {
+            try {
+                val serverMessages = messageService.fetchMessagesForContact(contactId)
+                if (serverMessages.isNotEmpty()) {
+                    messages = serverMessages
+                    // Save to local database
+                    serverMessages.forEach { messageRepository.addMessage(it) }
+                }
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Error loading messages", e)
+            }
+        }
+    }
+
+    // Set up periodic refresh (every 5 seconds)
+    LaunchedEffect(contactId) {
+        while (true) {
+            delay(5000)
+            coroutineScope.launch {
+                try {
+                    val serverMessages = messageService.fetchMessagesForContact(contactId)
+                    if (serverMessages.isNotEmpty()) {
+                        messages = serverMessages
+                        serverMessages.forEach { messageRepository.addMessage(it) }
+                    }
+                } catch (e: Exception) {
+                    Log.e("ChatScreen", "Error refreshing messages", e)
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -223,28 +271,72 @@ fun ChatScreen(
                         )
 
                         Spacer(modifier = Modifier.width(8.dp))
+//                        IconButton(
+//                            onClick = {
+//                                if (message.isNotBlank()) {
+//                                    val newMessage = Message(
+//                                        id = System.currentTimeMillis().toString(),
+//                                        content = message,
+//                                        encryptedContent = "", // You'll need to encrypt this
+//                                        senderId = "currentUserId", // Replace with actual user ID
+//                                        receiverId = contactId,
+//                                        timestamp = System.currentTimeMillis(),
+//                                        isRead = false
+//                                    )
+//
+//                                    coroutineScope.launch {
+//                                        messageRepository.addMessage(newMessage)
+//                                        message = ""
+//                                        isCodeFormat = false
+//                                    }
+//                                }
+//                            }
+//                        )
                         IconButton(
                             onClick = {
-                                if (message.isNotBlank()) {
-                                    val newMessage = Message(
-                                        id = System.currentTimeMillis().toString(),
-                                        content = message,
-                                        encryptedContent = "", // You'll need to encrypt this
-                                        senderId = "currentUserId", // Replace with actual user ID
-                                        receiverId = contactId,
-                                        timestamp = System.currentTimeMillis(),
-                                        isRead = false
-                                    )
-
+                                if (message.isNotBlank() && !isLoading) {
+                                    isLoading = true
                                     coroutineScope.launch {
-                                        messageRepository.addMessage(newMessage)
-                                        message = ""
-                                        isCodeFormat = false
+                                        val success = messageService.sendMessage(contactId, message)
+                                        if (success) {
+                                            // Create the message object for local storage
+                                            val newMessage = Message(
+                                                id = System.currentTimeMillis().toString(), // Use a temporary ID
+                                                content = message,
+                                                encryptedContent = message,
+                                                senderId = PrefsHelper.getUserUuid(context) ?: "",
+                                                receiverId = contactId,
+                                                timestamp = System.currentTimeMillis(),
+                                                isRead = false
+                                            )
+
+                                            // Save to local repository FIRST
+                                            messageRepository.addMessage(newMessage)
+
+                                            // Update UI with the new message
+                                            messages = messages + newMessage
+
+                                            // Clear input
+                                            message = ""
+                                            isCodeFormat = false
+
+                                            // Optional: Refresh from server to get the actual server-generated ID
+                                            val refreshedMessages = messageService.fetchMessagesForContact(contactId)
+                                            if (refreshedMessages.isNotEmpty()) {
+                                                messages = refreshedMessages
+                                            }
+                                        }
+                                        isLoading = false
                                     }
                                 }
-                            }
+                            },
+                            enabled = !isLoading && message.isNotBlank()
                         ) {
-                            Icon(Icons.Default.Send, contentDescription = "Send")
+                            if (isLoading) {
+                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            } else {
+                                Icon(Icons.Default.Send, contentDescription = "Send")
+                            }
                         }
                     }
                 }

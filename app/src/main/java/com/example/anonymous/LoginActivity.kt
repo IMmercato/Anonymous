@@ -1,6 +1,7 @@
 package com.example.anonymous
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
@@ -46,7 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -56,6 +57,7 @@ import androidx.core.view.WindowCompat
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.network.GraphQLRequest
 import com.example.anonymous.network.GraphQLService
+import com.example.anonymous.network.MessagePollingService
 import com.example.anonymous.network.QueryBuilder
 import com.example.anonymous.ui.theme.AnonymousTheme
 import com.example.anonymous.utils.CryptoUtils
@@ -315,6 +317,7 @@ fun SuccessUI(sessionToken: String, context: android.content.Context) {
         Spacer(modifier = Modifier.height(24.dp))
         Button(
             onClick = {
+                MessagePollingService.startService(this)
                 val intent = Intent(context, MainActivity::class.java)
                 context.startActivity(intent)
                 // Finish this activity to prevent going back to login
@@ -435,7 +438,7 @@ private fun startLoginProcess(
         try {
             // Step 1: Request nonce from server
             onStateChange(LoginState.Loading("Requesting verification challenge..."))
-            val nonce = requestNonceFromServer(jwt)
+            val nonce = requestNonceFromServer(context, jwt)
 
             // Step 2: Extract UUID from JWT
             val uuid = JwtUtils.extractUuidFromJwt(jwt)
@@ -457,7 +460,7 @@ private fun startLoginProcess(
 
             // Step 4: Complete login with signature to get extended session
             onStateChange(LoginState.Loading("Completing verification..."))
-            val sessionToken = completeLogin(uuid, signature)
+            val sessionToken = completeLogin(context ,uuid, signature)
 
             // Step 5: Save extended session
             PrefsHelper.saveSessionToken(context, sessionToken)
@@ -474,9 +477,9 @@ private fun startLoginProcess(
     }
 }
 
-private suspend fun requestNonceFromServer(jwt: String): String {
+private suspend fun requestNonceFromServer(context: Context, jwt: String): String {
     return withContext(Dispatchers.IO) {
-        val service = GraphQLService.create()
+        val service = GraphQLService.create(context)
         val request = GraphQLRequest(query = QueryBuilder.loginWithJwt(jwt))
         val response = service.loginWithJwt(request)
 
@@ -494,9 +497,9 @@ private suspend fun requestNonceFromServer(jwt: String): String {
     }
 }
 
-private suspend fun completeLogin(uuid: String, signature: String): String {
+private suspend fun completeLogin(context: Context, uuid: String, signature: String): String {
     return withContext(Dispatchers.IO) {
-        val service = GraphQLService.create()
+        val service = GraphQLService.create(context)
         val request = GraphQLRequest(query = QueryBuilder.completeLogin(uuid, signature))
         val response = service.completeLogin(request)
 

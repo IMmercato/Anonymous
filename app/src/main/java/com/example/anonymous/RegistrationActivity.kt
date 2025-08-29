@@ -194,7 +194,7 @@ class RegistrationActivity : ComponentActivity() {
                                         query = QueryBuilder.registerUser(publicKeyString)
                                     )
 
-                                    val service = GraphQLService.create()
+                                    val service = GraphQLService.create(context)    // this@RegistrationActivity
                                     val response = service.registerUser(request)
 
                                     if (response.isSuccessful) {

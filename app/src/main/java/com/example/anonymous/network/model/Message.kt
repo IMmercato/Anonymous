@@ -1,4 +1,4 @@
-package com.example.anonymous.model
+package com.example.anonymous.network.model
 
 import kotlinx.serialization.Serializable
 
@@ -10,5 +10,7 @@ data class Message(
     val senderId: String,
     val receiverId: String,
     val timestamp: Long,
-    val isRead: Boolean = false
+    val isRead: Boolean,
+    val iv: String? = null, // For AES-GCM
+    val dhPublicKey: String? = null // For ECDH key exchange
 )

@@ -21,12 +21,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.anonymous.controller.Controller
-import com.example.anonymous.model.Contact
+import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
+import com.example.anonymous.utils.JwtUtils
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 @Composable
 fun NewContactDialog(
@@ -46,8 +44,10 @@ fun NewContactDialog(
     }
 
     var scannedUuid by remember { mutableStateOf<String?>(null) }
+    var scannedPublicKey by remember { mutableStateOf<String?>(null) }
     var contactName by remember { mutableStateOf("") }
     var duplicateError by remember { mutableStateOf(false) }
+    var scanError by remember { mutableStateOf<String?>(null) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -70,25 +70,43 @@ fun NewContactDialog(
                 onDismissRequest = onDismiss,
                 title = { Text("Scan QR Code") },
                 text = {
-                    Box(modifier = Modifier.height(300.dp)) {
-                        CameraQrScanner(
-                            context = context,
-                            lifecycleOwner = lifecycleOwner,
-                            onQrDecoded = { text ->
-                                try {
-                                    val jsonElement = Json.parseToJsonElement(text)
-                                    val uuid = jsonElement.jsonObject["uuid"]?.jsonPrimitive?.content
-                                    if (!uuid.isNullOrBlank()) {
-                                        scannedUuid = uuid
-                                    } else {
-                                        onDismiss()
+                    Column {
+                        scanError?.let { error ->
+                            Text(
+                                text = error,
+                                color = androidx.compose.ui.graphics.Color.Red,
+                                modifier = Modifier.padding(bottom = 8.dp)
+                            )
+                        }
+                        Box(modifier = Modifier.height(300.dp)) {
+                            CameraQrScanner(
+                                context = context,
+                                lifecycleOwner = lifecycleOwner,
+                                onQrDecoded = { text ->
+                                    try {
+                                        // Validate that this is a JWT and extract UUID
+                                        if (JwtUtils.isJwtValid(text)) {
+                                            val uuid = JwtUtils.extractUuidFromJwt(text)
+                                            val publicKey = JwtUtils.extractPublicKeyFromJwt(text)
+                                            if (!uuid.isNullOrBlank() && !publicKey.isNullOrBlank()) {
+                                                scannedUuid = uuid
+                                                scannedPublicKey = publicKey
+                                                scanError = null
+                                            } else {
+                                                scanError = "Invalid QR code: No UUID found"
+                                            }
+                                        } else {
+                                            scanError = "Invalid or expired QR code"
+                                        }
+                                    } catch (e: Exception) {
+                                        scanError = "Failed to scan QR code: ${e.message}"
                                     }
-                                } catch (_: Exception) {
-                                    onDismiss()
+                                },
+                                onError = {
+                                    scanError = "Camera error occurred"
                                 }
-                            },
-                            onError = { onDismiss() }
-                        )
+                            )
+                        }
                     }
                 },
                 confirmButton = {
@@ -103,11 +121,12 @@ fun NewContactDialog(
                     scannedUuid = null
                     contactName = ""
                     duplicateError = false
+                    scanError = null
                 },
                 title = { Text("Add Contact") },
                 text = {
                     Column {
-                        Text("Scanned ID: $scannedUuid")
+                        Text("Scanned ID: ${scannedUuid?.take(10)}...")
                         Spacer(modifier = Modifier.height(16.dp))
                         TextField(
                             value = contactName,
@@ -152,6 +171,7 @@ fun NewContactDialog(
                             scannedUuid = null
                             contactName = ""
                             duplicateError = false
+                            scanError = null
                         }
                     ) {
                         Text("Cancel")
@@ -174,8 +194,12 @@ private fun CameraQrScanner(
     LaunchedEffect(Unit) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
-            bindAnalysisUseCase(cameraProvider, lifecycleOwner, previewView, onQrDecoded)
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                bindAnalysisUseCase(cameraProvider, lifecycleOwner, previewView, onQrDecoded)
+            } catch (e: Exception) {
+                onError()
+            }
         }, ContextCompat.getMainExecutor(context))
     }
 
@@ -191,32 +215,37 @@ private fun bindAnalysisUseCase(
     previewView: PreviewView,
     onQrDecoded: (String) -> Unit
 ) {
-    cameraProvider.unbindAll()
+    try {
+        cameraProvider.unbindAll()
 
-    val preview = Preview.Builder().build().also {
-        it.setSurfaceProvider(previewView.surfaceProvider)
-    }
-
-    val analyzer = ImageAnalysis.Builder()
-        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-        .build()
-        .also { analysis ->
-            analysis.setAnalyzer(ContextCompat.getMainExecutor(previewView.context)) { imageProxy ->
-                try {
-                    val bitmap = Controller.imageProxyToBitmap(imageProxy)
-                    if (bitmap != null) {
-                        val text = Controller.decodeQRCodeFromBitmap(bitmap)
-                        if (text != null) {
-                            onQrDecoded(text)
-                            cameraProvider.unbindAll()
-                        }
-                    }
-                } catch (_: Exception) {
-                } finally {
-                    imageProxy.close()
-                }
-            }
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
         }
 
-    cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analyzer)
+        val analyzer = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { analysis ->
+                analysis.setAnalyzer(ContextCompat.getMainExecutor(previewView.context)) { imageProxy ->
+                    try {
+                        val bitmap = Controller.imageProxyToBitmap(imageProxy)
+                        if (bitmap != null) {
+                            val text = Controller.decodeQRCodeFromBitmap(bitmap)
+                            if (text != null) {
+                                onQrDecoded(text)
+                                cameraProvider.unbindAll()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        // Continue scanning on error
+                    } finally {
+                        imageProxy.close()
+                    }
+                }
+            }
+
+        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analyzer)
+    } catch (e: Exception) {
+        // Handle camera binding errors
+    }
 }
