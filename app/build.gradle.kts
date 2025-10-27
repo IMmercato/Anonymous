@@ -84,6 +84,7 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.converter.gson)
     implementation(libs.androidx.lifecycle.service)
+    implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.localbroadcastmanager)
     implementation(libs.logging.interceptor)
     testImplementation(libs.junit)

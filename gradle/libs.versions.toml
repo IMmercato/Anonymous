@@ -1,7 +1,7 @@
 [versions]
 accompanistPermissions = "0.35.0-alpha"
 accompanistPermissionsVersion = "<latest_version>"
-agp = "8.8.2"
+agp = "8.13.0"
 apolloRuntime = "4.3.2"
 cameraCamera2 = "1.4.2"
 cameraCamera2Version = "1.3.0"
@@ -44,6 +44,7 @@ okhttp = "4.12.0"
 postgresql = "42.5.0"
 generativeai = "0.9.0"
 lifecycleService = "2.9.2"
+securityCrypto = "1.1.0"
 
 [libraries]
 accompanist-permissions-v0350alpha = { module = "com.google.accompanist:accompanist-permissions", version.ref = "accompanistPermissions" }
@@ -64,6 +65,7 @@ androidx-media3-common = { module = "androidx.media3:media3-common", version.ref
 androidx-media3-effect = { module = "androidx.media3:media3-effect", version.ref = "media3Effect" }
 androidx-media3-transformer = { module = "androidx.media3:media3-transformer", version.ref = "media3Transformer" }
 androidx-media3-transformer-v101 = { module = "androidx.media3:media3-transformer", version.ref = "media3TransformerVersion" }
+androidx-security-crypto = { module = "androidx.security:security-crypto", version.ref = "securityCrypto" }
 apollo-runtime = { module = "com.apollographql.apollo:apollo-runtime", version.ref = "apolloRuntime" }
 coil-compose = { module = "io.coil-kt:coil-compose", version.ref = "coilCompose" }
 coil-gif = { module = "io.coil-kt:coil-gif", version.ref = "coilCompose" }
