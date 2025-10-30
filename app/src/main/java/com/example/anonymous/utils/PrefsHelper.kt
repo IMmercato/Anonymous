@@ -2,12 +2,21 @@ package com.example.anonymous.utils
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+import java.security.KeyPair
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.PublicKey
 
 object PrefsHelper {
 
     private const val PREFS_NAME = "anonymous_prefs"
 
-    // Key names for stored values
+    // Key names
     private const val KEY_KEY_ALIAS = "key_alias"
     private const val KEY_REGISTRATION_JWT = "registration_jwt"
     private const val KEY_SESSION_TOKEN = "session_token"
@@ -17,118 +26,174 @@ object PrefsHelper {
     private const val KEY_LAST_LOGIN_TIME = "last_login_time"
     private const val KEY_IS_LOGGED_IN = "is_logged_in"
 
+    // --- Secure SharedPreferences ---
     private fun getSharedPreferences(context: Context): SharedPreferences {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // Build a modern MasterKey using KeyGenParameterSpec (no deprecations)
+        val keyGenParameterSpec = KeyGenParameterSpec.Builder(
+            MasterKey.DEFAULT_MASTER_KEY_ALIAS,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .build()
+
+        val masterKey = MasterKey.Builder(context)
+            .setKeyGenParameterSpec(keyGenParameterSpec)
+            .build()
+
+        return EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
     }
 
-    // Key alias management
+    // --- Keystore ---
+    private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
+
+    fun generateOrGetKeyPair(alias: String): KeyPair {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        return if (ks.containsAlias(alias)) {
+            val privateKey = ks.getKey(alias, null) as PrivateKey
+            val publicKey = ks.getCertificate(alias).publicKey
+            KeyPair(publicKey, privateKey)
+        } else {
+            val kpg = KeyPairGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_RSA, KEYSTORE_PROVIDER
+            )
+            val spec = KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
+                .build()
+
+            kpg.initialize(spec)
+            kpg.generateKeyPair()
+        }
+    }
+
+    fun getPublicKey(alias: String): PublicKey? {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        return if (ks.containsAlias(alias)) ks.getCertificate(alias).publicKey else null
+    }
+
+    fun deleteKeyPair(alias: String) {
+        val ks = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
+        if (ks.containsAlias(alias)) ks.deleteEntry(alias)
+    }
+
+    // --- SharedPreferences extension ---
+    private inline fun SharedPreferences.edit(operation: SharedPreferences.Editor.() -> Unit) {
+        val editor = edit()
+        editor.operation()
+        editor.apply()
+    }
+
+    // --- Key alias ---
     fun saveKeyAlias(context: Context, alias: String) {
-        getSharedPreferences(context).edit().putString(KEY_KEY_ALIAS, alias).apply()
+        getSharedPreferences(context).edit { putString(KEY_KEY_ALIAS, alias) }
     }
 
-    fun getKeyAlias(context: Context): String? {
-        return getSharedPreferences(context).getString(KEY_KEY_ALIAS, null)
-    }
+    fun getKeyAlias(context: Context): String? =
+        getSharedPreferences(context).getString(KEY_KEY_ALIAS, null)
 
     fun clearKeyAlias(context: Context) {
-        getSharedPreferences(context).edit().remove(KEY_KEY_ALIAS).apply()
+        getSharedPreferences(context).edit { remove(KEY_KEY_ALIAS) }
     }
 
-    // Registration JWT management
+    // --- Registration JWT ---
     fun saveRegistrationJwt(context: Context, jwt: String) {
-        getSharedPreferences(context).edit().putString(KEY_REGISTRATION_JWT, jwt).apply()
+        getSharedPreferences(context).edit { putString(KEY_REGISTRATION_JWT, jwt) }
     }
 
-    fun getRegistrationJwt(context: Context): String? {
-        return getSharedPreferences(context).getString(KEY_REGISTRATION_JWT, null)
-    }
+    fun getRegistrationJwt(context: Context): String? =
+        getSharedPreferences(context).getString(KEY_REGISTRATION_JWT, null)
 
     fun clearRegistrationJwt(context: Context) {
-        getSharedPreferences(context).edit().remove(KEY_REGISTRATION_JWT).apply()
+        getSharedPreferences(context).edit { remove(KEY_REGISTRATION_JWT) }
     }
 
-    // Session token management
+    // --- Session token ---
     fun saveSessionToken(context: Context, token: String) {
-        getSharedPreferences(context).edit().putString(KEY_SESSION_TOKEN, token).apply()
+        getSharedPreferences(context).edit { putString(KEY_SESSION_TOKEN, token) }
     }
 
-    fun getSessionToken(context: Context): String? {
-        return getSharedPreferences(context).getString(KEY_SESSION_TOKEN, null)
-    }
+    fun getSessionToken(context: Context): String? =
+        getSharedPreferences(context).getString(KEY_SESSION_TOKEN, null)
 
     fun clearSessionToken(context: Context) {
-        getSharedPreferences(context).edit().remove(KEY_SESSION_TOKEN).apply()
+        getSharedPreferences(context).edit { remove(KEY_SESSION_TOKEN) }
     }
 
-    // User UUID management
+    // --- User UUID ---
     fun saveUserUuid(context: Context, uuid: String) {
-        getSharedPreferences(context).edit().putString(KEY_USER_UUID, uuid).apply()
+        getSharedPreferences(context).edit { putString(KEY_USER_UUID, uuid) }
     }
 
-    fun getUserUuid(context: Context): String? {
-        return getSharedPreferences(context).getString(KEY_USER_UUID, null)
-    }
+    fun getUserUuid(context: Context): String? =
+        getSharedPreferences(context).getString(KEY_USER_UUID, null)
 
     fun clearUserUuid(context: Context) {
-        getSharedPreferences(context).edit().remove(KEY_USER_UUID).apply()
+        getSharedPreferences(context).edit { remove(KEY_USER_UUID) }
     }
 
-    // Public key management
+    // --- Public key (string form, if needed) ---
     fun savePublicKey(context: Context, publicKey: String) {
-        getSharedPreferences(context).edit().putString(KEY_PUBLIC_KEY, publicKey).apply()
+        getSharedPreferences(context).edit { putString(KEY_PUBLIC_KEY, publicKey) }
     }
 
-    fun getPublicKey(context: Context): String? {
-        return getSharedPreferences(context).getString(KEY_PUBLIC_KEY, null)
-    }
+    fun getPublicKey(context: Context): String? =
+        getSharedPreferences(context).getString(KEY_PUBLIC_KEY, null)
 
     fun clearPublicKey(context: Context) {
-        getSharedPreferences(context).edit().remove(KEY_PUBLIC_KEY).apply()
+        getSharedPreferences(context).edit { remove(KEY_PUBLIC_KEY) }
     }
 
-    // Timestamp management
+    // --- Timestamps ---
     fun saveLastRegistrationTime(context: Context, timestamp: Long) {
-        getSharedPreferences(context).edit().putLong(KEY_LAST_REGISTRATION_TIME, timestamp).apply()
+        getSharedPreferences(context).edit { putLong(KEY_LAST_REGISTRATION_TIME, timestamp) }
     }
 
-    fun getLastRegistrationTime(context: Context): Long {
-        return getSharedPreferences(context).getLong(KEY_LAST_REGISTRATION_TIME, 0L)
-    }
+    fun getLastRegistrationTime(context: Context): Long =
+        getSharedPreferences(context).getLong(KEY_LAST_REGISTRATION_TIME, 0L)
 
     fun saveLastLoginTime(context: Context, timestamp: Long) {
-        getSharedPreferences(context).edit().putLong(KEY_LAST_LOGIN_TIME, timestamp).apply()
+        getSharedPreferences(context).edit { putLong(KEY_LAST_LOGIN_TIME, timestamp) }
     }
 
-    fun getLastLoginTime(context: Context): Long {
-        return getSharedPreferences(context).getLong(KEY_LAST_LOGIN_TIME, 0L)
-    }
+    fun getLastLoginTime(context: Context): Long =
+        getSharedPreferences(context).getLong(KEY_LAST_LOGIN_TIME, 0L)
 
-    // Login state management
+    // --- Login state ---
     fun setLoggedIn(context: Context, isLoggedIn: Boolean) {
-        getSharedPreferences(context).edit().putBoolean(KEY_IS_LOGGED_IN, isLoggedIn).apply()
+        getSharedPreferences(context).edit { putBoolean(KEY_IS_LOGGED_IN, isLoggedIn) }
     }
 
-    fun isLoggedIn(context: Context): Boolean {
-        return getSharedPreferences(context).getBoolean(KEY_IS_LOGGED_IN, false)
-    }
+    fun isLoggedIn(context: Context): Boolean =
+        getSharedPreferences(context).getBoolean(KEY_IS_LOGGED_IN, false)
 
-    // Comprehensive cleanup methods
+    // --- Cleanup ---
     fun clearAllAuthData(context: Context) {
-        getSharedPreferences(context).edit()
-            .remove(KEY_KEY_ALIAS)
-            .remove(KEY_REGISTRATION_JWT)
-            .remove(KEY_SESSION_TOKEN)
-            .remove(KEY_USER_UUID)
-            .remove(KEY_PUBLIC_KEY)
-            .remove(KEY_IS_LOGGED_IN)
-            .apply()
+        getSharedPreferences(context).edit {
+            remove(KEY_KEY_ALIAS)
+            remove(KEY_REGISTRATION_JWT)
+            remove(KEY_SESSION_TOKEN)
+            remove(KEY_USER_UUID)
+            remove(KEY_PUBLIC_KEY)
+            remove(KEY_IS_LOGGED_IN)
+        }
     }
 
     fun clearAll(context: Context) {
-        getSharedPreferences(context).edit().clear().apply()
+        getSharedPreferences(context).edit { clear() }
     }
 
-    // Utility methods to check if user has completed registration
+    // --- Registration checks ---
     fun hasCompletedRegistration(context: Context): Boolean {
         val prefs = getSharedPreferences(context)
         return prefs.contains(KEY_KEY_ALIAS) &&
@@ -136,47 +201,42 @@ object PrefsHelper {
                 prefs.contains(KEY_USER_UUID)
     }
 
-    // Check if registration JWT is still valid
     fun isRegistrationValid(context: Context): Boolean {
         val jwt = getRegistrationJwt(context)
         return jwt != null && JwtUtils.isJwtValid(jwt)
     }
 
-    // Get time remaining for registration JWT
     fun getRegistrationTimeRemaining(context: Context): Long {
         val jwt = getRegistrationJwt(context)
         return if (jwt != null) JwtUtils.getJwtTimeRemaining(jwt) else 0L
     }
 
-    // Check if session token is valid (basic check - not expired)
     fun isSessionValid(context: Context): Boolean {
         val token = getSessionToken(context)
         return token != null && JwtUtils.isJwtValid(token)
     }
 
-    // Get all stored data for debugging purposes
-    fun getAllStoredData(context: Context): Map<String, *> {
-        return getSharedPreferences(context).all
-    }
+    // --- Debugging ---
+    fun getAllStoredData(context: Context): Map<String, *> =
+        getSharedPreferences(context).all
 
-    // Migration helper (if you need to change storage format in future)
+    // --- Migration ---
     fun migrateData(context: Context, oldPrefsName: String) {
         val oldPrefs = context.getSharedPreferences(oldPrefsName, Context.MODE_PRIVATE)
         val newPrefs = getSharedPreferences(context)
-        val editor = newPrefs.edit()
 
-        oldPrefs.all.forEach { (key, value) ->
-            when (value) {
-                is String -> editor.putString(key, value)
-                is Int -> editor.putInt(key, value)
-                is Long -> editor.putLong(key, value)
-                is Float -> editor.putFloat(key, value)
-                is Boolean -> editor.putBoolean(key, value)
+        newPrefs.edit {
+            oldPrefs.all.forEach { (key, value) ->
+                when (value) {
+                    is String -> putString(key, value)
+                    is Int -> putInt(key, value)
+                    is Long -> putLong(key, value)
+                    is Float -> putFloat(key, value)
+                    is Boolean -> putBoolean(key, value)
+                }
             }
         }
-        editor.apply()
 
-        // Clear old preferences after migration
         oldPrefs.edit().clear().apply()
     }
 }
