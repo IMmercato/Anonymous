@@ -70,6 +70,7 @@ import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class LoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -460,9 +461,13 @@ private fun startLoginProcess(
 
             // Step 4: Complete login with signature to get extended session
             onStateChange(LoginState.Loading("Completing verification..."))
-            val sessionToken = completeLogin(context ,uuid, signature)
+            val (sessionToken, qrToken) = completeLogin(context, uuid, signature)
 
-            // Step 5: Save extended session
+            // Step 5: Update QR
+            onStateChange(LoginState.Loading("Updating your QR code..."))
+            updateQrCodeWithNewToken(context, qrToken)
+
+            // Step 6: Save extended session
             PrefsHelper.saveSessionToken(context, sessionToken)
             PrefsHelper.setLoggedIn(context, true)
             PrefsHelper.saveUserUuid(context, uuid)
@@ -497,7 +502,7 @@ private suspend fun requestNonceFromServer(context: Context, jwt: String): Strin
     }
 }
 
-private suspend fun completeLogin(context: Context, uuid: String, signature: String): String {
+private suspend fun completeLogin(context: Context, uuid: String, signature: String): Pair<String, String> {
     return withContext(Dispatchers.IO) {
         val service = GraphQLService.create(context)
         val request = GraphQLRequest(query = QueryBuilder.completeLogin(uuid, signature))
@@ -505,14 +510,54 @@ private suspend fun completeLogin(context: Context, uuid: String, signature: Str
 
         if (response.isSuccessful) {
             val sessionPayload = response.body()?.data?.completeLogin
-            if (sessionPayload != null && sessionPayload.token.isNotEmpty()) {
-                return@withContext sessionPayload.token
+            if (sessionPayload != null && sessionPayload.token.isNotEmpty() && sessionPayload.qrToken.isNotEmpty()) {
+                return@withContext Pair(sessionPayload.token, sessionPayload.qrToken)
             } else {
                 throw Exception("Server returned invalid session response")
             }
         } else {
             val errorBody = response.errorBody()?.string()
             throw Exception("Verification completion failed: ${errorBody ?: "Unknown error"}")
+        }
+    }
+}
+
+private suspend fun updateQrCodeWithNewToken(context: Context, newQrToken: String) {
+    return withContext(Dispatchers.IO) {
+        try {
+            // Generate new QR code with the extended token
+            val newBitmap = Controller.generateQRCode(newQrToken)
+            if (newBitmap == null) {
+                throw Exception("Failed to generate new QR code")
+            }
+
+            // Delete old QR code and save new one
+            val oldFile = File(context.filesDir, "qr_identity.png")
+            if (oldFile.exists()) {
+                oldFile.delete()
+                Log.d("LoginActivity", "Deleted old QR code")
+            }
+
+            // Save new QR code
+            Controller.saveBitmapToInternalStorage(context, newBitmap, "qr_identity.png")
+
+            // Optional: Also save to gallery with timestamp
+            val timestamp = System.currentTimeMillis()
+            Controller.saveBitmapToGallery(context, newBitmap, "anonymous_identity_$timestamp.png")
+
+            Log.d("LoginActivity", "QR code updated successfully with extended token")
+
+            // Validate the new token
+            if (JwtUtils.isJwtValid(newQrToken)) {
+                val expiration = JwtUtils.getJwtExpiration(newQrToken)
+                val timeRemaining = JwtUtils.formatTimeRemaining(expiration - System.currentTimeMillis())
+                Log.d("LoginActivity", "New QR token valid for: $timeRemaining")
+            }
+
+        } catch (e: Exception) {
+            Log.e("LoginActivity", "Failed to update QR code", e)
+            // Don't throw here - we still want to proceed with login even if QR update fails
+            // But you might want to show a warning to the user
         }
     }
 }

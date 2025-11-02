@@ -43,6 +43,7 @@ object QueryBuilder {
         mutation {
             completeLogin(uuid: "$uuid", signature: "$signature") {
                 token
+                qrToken
             }
         }
     """.trimIndent()
