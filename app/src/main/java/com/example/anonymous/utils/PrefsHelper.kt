@@ -51,6 +51,11 @@ object PrefsHelper {
         )
     }
 
+    // Encrypted SharedPrefs
+    fun getSecurePrefs(context: Context) : SharedPreferences {
+        return getSharedPreferences(context)
+    }
+
     // --- Keystore ---
     private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
 
