@@ -2,120 +2,130 @@ package com.example.anonymous.crypto
 
 import android.content.Context
 import android.util.Base64
+import com.example.anonymous.utils.PrefsHelper
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
+import javax.crypto.Mac
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object CryptoManager {
-    private const val TAG = "CryptoManager"
-    private const val AES_KEY_SIZE = 256
-    private const val GCM_TAG_LENGTH = 128
+    private const val AES_KEY_SIZE_BYTES = 32
+    private const val GCM_TAG_LENGTH_BITS = 128
     private const val GCM_IV_LENGTH = 12
+    private const val FORMAT_VERSION = 1
 
-    // Generate ECDH key pair
+    data class EncryptedMessage(
+        val v: Int,              // version
+        val iv: String,          // base64
+        val ct: String,          // base64 (ciphertext || tag)
+        val aad: String? = null  // optional base64
+    )
+
+    // Generate ECDH P-256 key pair (use X25519 later)
     fun generateECDHKeyPair(): KeyPair {
-        val keyPairGenerator = KeyPairGenerator.getInstance("EC")
-        keyPairGenerator.initialize(256)
-        return keyPairGenerator.generateKeyPair()
+        val kpg = KeyPairGenerator.getInstance("EC")
+        kpg.initialize(256)
+        return kpg.generateKeyPair()
     }
 
-    // Perform ECDH key exchange
     fun performECDH(myPrivateKey: PrivateKey, theirPublicKey: PublicKey): ByteArray {
-        val keyAgreement = KeyAgreement.getInstance("ECDH")
-        keyAgreement.init(myPrivateKey)
-        keyAgreement.doPhase(theirPublicKey, true)
-        return keyAgreement.generateSecret()
+        val ka = KeyAgreement.getInstance("ECDH")
+        ka.init(myPrivateKey)
+        ka.doPhase(theirPublicKey, true)
+        return ka.generateSecret()
     }
 
-    // Derive AES key from shared secret
-    fun deriveAESKey(sharedSecret: ByteArray, salt: ByteArray = ByteArray(0)): SecretKey {
-        // Simple HKDF-like derivation (in production, use proper HKDF)
-        val derivedKey = sharedSecret.copyOf(32) // Take first 32 bytes for AES-256
-        return SecretKeySpec(derivedKey, "AES")
-    }
+    // Proper HKDF-SHA256 (extract + expand)
+    fun hkdfSha256(sharedSecret: ByteArray, salt: ByteArray, info: ByteArray, length: Int = AES_KEY_SIZE_BYTES): ByteArray {
+        // Extract
+        val macExtract = Mac.getInstance("HmacSHA256")
+        macExtract.init(SecretKeySpec(salt, "HmacSHA256"))
+        val prk = macExtract.doFinal(sharedSecret)
 
-    // Encrypt message with AES-GCM
-    fun encryptMessage(message: String, key: SecretKey): EncryptedMessage {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val iv = ByteArray(GCM_IV_LENGTH).apply {
-            SecureRandom().nextBytes(this)
+        // Expand
+        var t = ByteArray(0)
+        var okm = ByteArray(0)
+        var counter = 1
+        while (okm.size < length) {
+            val macExpand = Mac.getInstance("HmacSHA256")
+            macExpand.init(SecretKeySpec(prk, "HmacSHA256"))
+            macExpand.update(t)
+            macExpand.update(info)
+            macExpand.update(counter.toByte())
+            t = macExpand.doFinal()
+            okm += t
+            counter++
         }
+        return okm.copyOf(length)
+    }
 
-        val parameterSpec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, key, parameterSpec)
+    fun deriveAESKey(sharedSecret: ByteArray, salt: ByteArray, info: ByteArray): SecretKey {
+        val keyBytes = hkdfSha256(sharedSecret, salt, info, AES_KEY_SIZE_BYTES)
+        return SecretKeySpec(keyBytes, "AES")
+    }
 
-        val cipherText = cipher.doFinal(message.toByteArray(Charsets.UTF_8))
-
+    fun encryptMessage(message: String, key: SecretKey, aad: ByteArray? = null): EncryptedMessage {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        val iv = ByteArray(GCM_IV_LENGTH).also { SecureRandom().nextBytes(it) }
+        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
+        cipher.init(Cipher.ENCRYPT_MODE, key, spec)
+        if (aad != null) cipher.updateAAD(aad)
+        val ct = cipher.doFinal(message.toByteArray(Charsets.UTF_8))
         return EncryptedMessage(
+            v = FORMAT_VERSION,
             iv = Base64.encodeToString(iv, Base64.NO_WRAP),
-            ciphertext = Base64.encodeToString(cipherText, Base64.NO_WRAP)
+            ct = Base64.encodeToString(ct, Base64.NO_WRAP),
+            aad = aad?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
         )
     }
 
-    // Decrypt message with AES-GCM
-    fun decryptMessage(encryptedMessage: EncryptedMessage, key: SecretKey): String {
+    fun decryptMessage(encrypted: EncryptedMessage, key: SecretKey): String {
+        require(encrypted.v == FORMAT_VERSION) { "Unsupported ciphertext version: ${encrypted.v}" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val iv = Base64.decode(encryptedMessage.iv, Base64.NO_WRAP)
-        val cipherText = Base64.decode(encryptedMessage.ciphertext, Base64.NO_WRAP)
-
-        val parameterSpec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
-        cipher.init(Cipher.DECRYPT_MODE, key, parameterSpec)
-
-        val decryptedBytes = cipher.doFinal(cipherText)
-        return String(decryptedBytes, Charsets.UTF_8)
+        val iv = Base64.decode(encrypted.iv, Base64.NO_WRAP)
+        val ct = Base64.decode(encrypted.ct, Base64.NO_WRAP)
+        val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
+        cipher.init(Cipher.DECRYPT_MODE, key, spec)
+        encrypted.aad?.let { cipher.updateAAD(Base64.decode(it, Base64.NO_WRAP)) }
+        val pt = cipher.doFinal(ct) // throws on tag failure
+        return String(pt, Charsets.UTF_8)
     }
 
-    data class EncryptedMessage(
-        val iv: String,
-        val ciphertext: String
-    )
-
-    // Generate key pair for a contact session
-    suspend fun generateSessionKeyPair(context: Context, contactId: String): KeyPair {
-        val keyPair = generateECDHKeyPair()
-        saveKeyPair(context, contactId, keyPair)
-        return keyPair
-    }
-
+    // Store per-contact key pairs in EncryptedSharedPreferences, not plain SharedPreferences
     fun saveKeyPair(context: Context, contactId: String, keyPair: KeyPair) {
-        val prefs = context.getSharedPreferences("crypto_keys", Context.MODE_PRIVATE)
-        val publicKeyBytes = keyPair.public.encoded
-        val privateKeyBytes = keyPair.private.encoded
-
+        val prefs = PrefsHelper.getSecurePrefs(context)
+        val pubB64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP)
+        val privB64 = Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP)
         prefs.edit()
-            .putString("${contactId}_public", Base64.encodeToString(publicKeyBytes, Base64.NO_WRAP))
-            .putString("${contactId}_private", Base64.encodeToString(privateKeyBytes, Base64.NO_WRAP))
+            .putString("${contactId}_public", pubB64)
+            .putString("${contactId}_private", privB64)
             .apply()
     }
 
     fun getKeyPair(context: Context, contactId: String): KeyPair? {
-        val prefs = context.getSharedPreferences("crypto_keys", Context.MODE_PRIVATE)
-        val publicKeyStr = prefs.getString("${contactId}_public", null)
-        val privateKeyStr = prefs.getString("${contactId}_private", null)
+        val prefs = PrefsHelper.getSecurePrefs(context)
+        val pubStr = prefs.getString("${contactId}_public", null)
+        val privStr = prefs.getString("${contactId}_private", null)
+        if (pubStr == null || privStr == null) return null
 
-        return if (publicKeyStr != null && privateKeyStr != null) {
-            val publicKeyBytes = Base64.decode(publicKeyStr, Base64.NO_WRAP)
-            val privateKeyBytes = Base64.decode(privateKeyStr, Base64.NO_WRAP)
+        val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
+        val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
 
-            // Reconstruct key pair (simplified - in production use proper key factory)
-            val publicKey = java.security.spec.X509EncodedKeySpec(publicKeyBytes).let {
-                KeyFactory.getInstance("EC").generatePublic(it)
-            }
-            val privateKey = java.security.spec.PKCS8EncodedKeySpec(privateKeyBytes).let {
-                KeyFactory.getInstance("EC").generatePrivate(it)
-            }
+        val pubKey = KeyFactory.getInstance("EC")
+            .generatePublic(X509EncodedKeySpec(pubBytes))
+        val privKey = KeyFactory.getInstance("EC")
+            .generatePrivate(PKCS8EncodedKeySpec(privBytes))
 
-            KeyPair(publicKey, privateKey)
-        } else {
-            null
-        }
+        return KeyPair(pubKey, privKey)
     }
 }
