@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.network.GraphQLMessageService
+import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.MessageRepository
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.delay
@@ -71,14 +72,6 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-
-// Data model for an individual chat message.
-data class ChatMessageModel(
-    val id: Long = System.currentTimeMillis(),
-    val content: String,
-    val isSent: Boolean,
-    val isCode: Boolean = false
-)
 
 sealed class IconType(val action: (String) -> String) {
     data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
@@ -98,7 +91,7 @@ fun ChatScreen(
     val messageService = remember { GraphQLMessageService(context) }
     val currentUserId = PrefsHelper.getUserUuid(context) ?: ""
 
-    var messages by remember { mutableStateOf(emptyList<ChatMessageModel>()) }
+    var messages by remember { mutableStateOf(emptyList<Message>()) }
     var message by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
@@ -120,16 +113,8 @@ fun ChatScreen(
     // Load messages on start
     LaunchedEffect(contactId) {
         // Load from local database first
-        val allMessages = messageRepository.getMessagesForContact(contactId)
+        val contactMessages = messageRepository.getMessagesForContact(contactId)
             .firstOrNull() ?: emptyList()
-
-        // Filter messages for this specific contact
-        val contactMessages = allMessages.filter {
-            // For sent messages: receiver should be this contact
-            // For received messages: sender should be this contact
-            it.isSent && it.content.contains("|receiver:$contactId") ||
-                    !it.isSent && it.content.contains("|sender:$contactId")
-        }
 
         messages = contactMessages
 
@@ -138,20 +123,9 @@ fun ChatScreen(
             try {
                 val serverMessages = messageService.fetchMessagesForContact(contactId)
                 if (serverMessages.isNotEmpty()) {
-                    // Convert server messages to ChatMessageModel
-                    val chatMessages = serverMessages.map { serverMsg ->
-                        val isSentByMe = serverMsg.senderId == currentUserId
-                        ChatMessageModel(
-                            id = serverMsg.id.toLongOrNull() ?: System.currentTimeMillis(),
-                            content = serverMsg.content + if (isSentByMe) "|receiver:$contactId" else "|sender:$contactId",
-                            isSent = isSentByMe,
-                            isCode = serverMsg.content.startsWith("```") && serverMsg.content.endsWith("```")
-                        )
-                    }
-
-                    messages = chatMessages
+                    messages = serverMessages
                     // Save to local database
-                    chatMessages.forEach { messageRepository.addMessage(it) }
+                    serverMessages.forEach { messageRepository.addMessage(it) }
                 }
             } catch (e: Exception) {
                 Log.e("ChatScreen", "Error loading messages", e)
@@ -167,20 +141,9 @@ fun ChatScreen(
                 try {
                     val serverMessages = messageService.fetchMessagesForContact(contactId)
                     if (serverMessages.isNotEmpty()) {
-                        // Convert server messages to ChatMessageModel
-                        val chatMessages = serverMessages.map { serverMsg ->
-                            val isSentByMe = serverMsg.senderId == currentUserId
-                            ChatMessageModel(
-                                id = serverMsg.id.toLongOrNull() ?: System.currentTimeMillis(),
-                                content = serverMsg.content + if (isSentByMe) "|receiver:$contactId" else "|sender:$contactId",
-                                isSent = isSentByMe,
-                                isCode = serverMsg.content.startsWith("```") && serverMsg.content.endsWith("```")
-                            )
-                        }
-
-                        messages = chatMessages
+                        messages = serverMessages
                         // Save to local database
-                        chatMessages.forEach { messageRepository.addMessage(it) }
+                        serverMessages.forEach { messageRepository.addMessage(it) }
                     }
                 } catch (e: Exception) {
                     Log.e("ChatScreen", "Error refreshing messages", e)
@@ -218,7 +181,8 @@ fun ChatScreen(
                     ChatMessage(
                         message = msg,
                         settings = customizationSettings,
-                        isCode = msg.isCode
+                        currentUserId = currentUserId,
+                        isCode = msg.content.startsWith("```") && msg.content.endsWith("```")
                     )
                 }
             }
@@ -308,12 +272,15 @@ fun ChatScreen(
                                     coroutineScope.launch {
                                         val success = messageService.sendMessage(contactId, message)
                                         if (success) {
-                                            // Create the ChatMessageModel for local storage
-                                            val newMessage = ChatMessageModel(
-                                                id = System.currentTimeMillis(),
-                                                content = message + "|receiver:$contactId",
-                                                isSent = true,
-                                                isCode = isCodeFormat
+                                            // Create the Message for local storage
+                                            val newMessage = Message(
+                                                id = System.currentTimeMillis().toString(),
+                                                content = message,
+                                                encryptedContent = "", // You might want to handle encryption here
+                                                senderId = currentUserId,
+                                                receiverId = contactId,
+                                                timestamp = System.currentTimeMillis(),
+                                                isRead = false
                                             )
 
                                             // Save to local repository
@@ -347,15 +314,14 @@ fun ChatScreen(
 
 @Composable
 fun ChatMessage(
-    message: ChatMessageModel,
+    message: Message,
     settings: ChatCustomizationSettings,
+    currentUserId: String,
     isCode: Boolean = false
 ) {
-    val bubbleColor = if (message.isSent) settings.sentBubbleColor else settings.receivedBubbleColor
-    val alignment = if (message.isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
-
-    // Extract actual message content (remove the contact info)
-    val actualContent = message.content.split("|").first()
+    val isSent = message.senderId == currentUserId
+    val bubbleColor = if (isSent) settings.sentBubbleColor else settings.receivedBubbleColor
+    val alignment = if (isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
 
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -365,8 +331,8 @@ fun ChatMessage(
             shape = RoundedCornerShape(
                 topStart = 12.dp,
                 topEnd = 12.dp,
-                bottomStart = if (message.isSent) 12.dp else 4.dp,
-                bottomEnd = if (message.isSent) 4.dp else 12.dp
+                bottomStart = if (isSent) 12.dp else 4.dp,
+                bottomEnd = if (isSent) 4.dp else 12.dp
             ),
             color = bubbleColor,
             shadowElevation = 2.dp,
@@ -376,7 +342,7 @@ fun ChatMessage(
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text(
-                    text = actualContent,
+                    text = message.content,
                     style = MaterialTheme.typography.bodyLarge.copy(
                         color = if (isCode) Color.White else Color.Black,
                         fontSize = if (isCode) 12.sp else 14.sp,
@@ -398,13 +364,13 @@ fun ChatMessage(
                 ) {
                     Text(
                         text = SimpleDateFormat("HH:mm", Locale.getDefault())
-                            .format(Date(message.id)),
+                            .format(Date(message.timestamp)),
                         style = MaterialTheme.typography.bodyMedium.copy(
                             color = Color.Gray,
                             fontSize = 10.sp
                         )
                     )
-                    if (!message.isSent) {
+                    if (!isSent) {
                         Spacer(modifier = Modifier.width(4.dp))
                         LoadingDots()
                     }
