@@ -30,6 +30,7 @@ export class AuthService {
     if (!verifySignature(user.publicKey, nonce, signature)) throw new Error('Invalid signature');
     await this.userService.updateUser(uuid, { lastLogin: new Date(), status: 'ACTIVE' });
     const sessionJwt = signJwt({ uuid }, "1h");
-    return { token: sessionJwt }
+    const qrJwt = signJwt({uuid, publicKey: user.publicKey}, "24h"); // 24h/1d
+    return { token: sessionJwt, qrToken: qrJwt }
   }
 }
