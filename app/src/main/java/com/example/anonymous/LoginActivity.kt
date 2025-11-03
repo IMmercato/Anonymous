@@ -70,7 +70,6 @@ import com.google.accompanist.permissions.rememberPermissionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 class LoginActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -435,6 +434,9 @@ private fun startLoginProcess(
 ) {
     onStateChange(LoginState.Loading("Verifying JWT..."))
 
+    // DEBUG: Full key status check
+    debugFullKeyStatus(context)
+
     coroutineScope.launch {
         try {
             // Step 1: Request nonce from server
@@ -463,11 +465,26 @@ private fun startLoginProcess(
             onStateChange(LoginState.Loading("Completing verification..."))
             val (sessionToken, qrToken) = completeLogin(context, uuid, signature)
 
-            // Step 5: Update QR
-            onStateChange(LoginState.Loading("Updating your QR code..."))
-            updateQrCodeWithNewToken(context, qrToken)
+            // Step 5: Validate that we got a NEW QR token with extended time
+            val oldExpiration = JwtUtils.getJwtExpiration(jwt)
+            val newExpiration = JwtUtils.getJwtExpiration(qrToken)
 
-            // Step 6: Save extended session
+            if (newExpiration <= oldExpiration) {
+                Log.w("LoginActivity", "Server returned same QR token, not updating QR code")
+                // Don't update QR code if it's the same token
+            } else {
+                // Step 6: Update QR code only if we got a new extended token
+                onStateChange(LoginState.Loading("Updating your QR code..."))
+                val success = Controller.handleLoginCompletion(context, qrToken, "qr_identity.png")
+
+                if (!success) {
+                    Log.w("LoginActivity", "QR code update had issues, but continuing with login")
+                } else {
+                    Log.d("LoginActivity", "QR code successfully updated with extended token")
+                }
+            }
+
+            // Step 7: Save extended session
             PrefsHelper.saveSessionToken(context, sessionToken)
             PrefsHelper.setLoggedIn(context, true)
             PrefsHelper.saveUserUuid(context, uuid)
@@ -476,10 +493,40 @@ private fun startLoginProcess(
 
         } catch (e: Exception) {
             Log.e("LoginActivity", "Verification failed", e)
+            // DEBUG: Check key status after failure
+            debugFullKeyStatus(context)
             val isRecoverable = !e.message?.contains("register again", ignoreCase = true)!! ?: true
             onStateChange(LoginState.Error(e.message ?: "Unknown error during verification", isRecoverable))
         }
     }
+}
+
+// Debugger
+private fun debugFullKeyStatus(context: Context) {
+    val prefs = PrefsHelper.getSecurePrefs(context)
+
+    Log.d("LoginActivity", "=== FULL KEY STATUS DEBUG ===")
+    Log.d("LoginActivity", "All preferences keys: ${prefs.all.keys}")
+
+    val keyAlias = prefs.getString("key_alias", null)
+    Log.d("LoginActivity", "Key alias in prefs: $keyAlias")
+
+    // Debug Android KeyStore directly
+    val keyStoreStatus = CryptoUtils.debugKeyStoreStatus()
+    Log.d("LoginActivity", "KeyStore status: $keyStoreStatus")
+
+    if (keyAlias != null) {
+        val keyExists = CryptoUtils.doesKeyExist(keyAlias)
+        Log.d("LoginActivity", "Key exists in AndroidKeyStore: $keyExists")
+
+        if (keyExists) {
+            val privateKey = CryptoUtils.getPrivateKey(keyAlias)
+            Log.d("LoginActivity", "Private key retrievable: ${privateKey != null}")
+        }
+    } else {
+        Log.e("LoginActivity", "CRITICAL: No key alias found in preferences!")
+    }
+    Log.d("LoginActivity", "=== END FULL DEBUG ===")
 }
 
 private suspend fun requestNonceFromServer(context: Context, jwt: String): String {
@@ -518,46 +565,6 @@ private suspend fun completeLogin(context: Context, uuid: String, signature: Str
         } else {
             val errorBody = response.errorBody()?.string()
             throw Exception("Verification completion failed: ${errorBody ?: "Unknown error"}")
-        }
-    }
-}
-
-private suspend fun updateQrCodeWithNewToken(context: Context, newQrToken: String) {
-    return withContext(Dispatchers.IO) {
-        try {
-            // Generate new QR code with the extended token
-            val newBitmap = Controller.generateQRCode(newQrToken)
-            if (newBitmap == null) {
-                throw Exception("Failed to generate new QR code")
-            }
-
-            // Delete old QR code and save new one
-            val oldFile = File(context.filesDir, "qr_identity.png")
-            if (oldFile.exists()) {
-                oldFile.delete()
-                Log.d("LoginActivity", "Deleted old QR code")
-            }
-
-            // Save new QR code
-            Controller.saveBitmapToInternalStorage(context, newBitmap, "qr_identity.png")
-
-            // Optional: Also save to gallery with timestamp
-            val timestamp = System.currentTimeMillis()
-            Controller.saveBitmapToGallery(context, newBitmap, "anonymous_identity_$timestamp.png")
-
-            Log.d("LoginActivity", "QR code updated successfully with extended token")
-
-            // Validate the new token
-            if (JwtUtils.isJwtValid(newQrToken)) {
-                val expiration = JwtUtils.getJwtExpiration(newQrToken)
-                val timeRemaining = JwtUtils.formatTimeRemaining(expiration - System.currentTimeMillis())
-                Log.d("LoginActivity", "New QR token valid for: $timeRemaining")
-            }
-
-        } catch (e: Exception) {
-            Log.e("LoginActivity", "Failed to update QR code", e)
-            // Don't throw here - we still want to proceed with login even if QR update fails
-            // But you might want to show a warning to the user
         }
     }
 }

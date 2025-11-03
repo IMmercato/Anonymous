@@ -11,7 +11,9 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import com.example.anonymous.utils.CryptoUtils
 import com.example.anonymous.utils.JwtUtils
+import com.example.anonymous.utils.PrefsHelper
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.EncodeHintType
 import com.google.zxing.NotFoundException
@@ -23,6 +25,7 @@ import com.google.zxing.RGBLuminanceSource
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.security.KeyStore
 
 object Controller {
     private const val TAG = "Controller"
@@ -64,26 +67,43 @@ object Controller {
         return bitmap
     }
 
-    // Cleanup invalid identity files
+    // Cleanup functions
     private fun cleanupInvalidIdentity(context: Context, identityFileName: String) {
         try {
-            // Delete internal storage file
+            // Delete internal storage file ONLY
             val identityFile = File(context.filesDir, identityFileName)
             if (identityFile.exists()) {
                 identityFile.delete()
                 Log.d(TAG, "Deleted invalid identity file from internal storage.")
             }
 
-            // Clear stored preferences
+            // DO NOT clear key_alias - only clear registration JWT
             val prefs = context.getSharedPreferences("anonymous_prefs", Context.MODE_PRIVATE)
-            prefs.edit().remove("key_alias").remove("registration_jwt").apply()
-            Log.d(TAG, "Cleared invalid identity from preferences.")
-
-            // TODO: Optionally notify server to cleanup user data
-            // This would require additional API call
+            prefs.edit().remove("registration_jwt").apply() // Only remove JWT, keep key_alias!
+            Log.d(TAG, "Cleared invalid JWT from preferences but preserved private key.")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error during identity cleanup", e)
+        }
+    }
+
+    // Cleanup all identity data (for logout or re-registration)
+    fun cleanupAllIdentityData(context: Context, identityFileName: String) {
+        try {
+            // Delete internal storage file
+            val identityFile = File(context.filesDir, identityFileName)
+            if (identityFile.exists()) {
+                identityFile.delete()
+                Log.d(TAG, "Deleted identity file from internal storage.")
+            }
+
+            // Clear preferences BUT preserve key_alias for future use
+            val prefs = context.getSharedPreferences("anonymous_prefs", Context.MODE_PRIVATE)
+            prefs.edit().remove("registration_jwt").remove("session_token").remove("user_uuid").apply()
+            Log.d(TAG, "Cleared identity preferences but preserved private key.")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during complete identity cleanup", e)
         }
     }
 
@@ -166,6 +186,92 @@ object Controller {
         }
     }
 
+    // Handle login completion and update QR code
+    fun handleLoginCompletion(context: Context, newJwt: String, identityFileName: String = "qr_identity.png"): Boolean {
+        return try {
+            Log.d(TAG, "Handling login completion with new JWT")
+
+            val prefs = PrefsHelper.getSecurePrefs(context)
+
+            // Try to get key alias - this is just a REFERENCE to the actual key in Android KeyStore
+            val keyAlias = prefs.getString("key_alias", null)
+
+            if (keyAlias == null) {
+                Log.e(TAG, "CRITICAL: Key alias not found in preferences")
+                // Try to find existing keys in Android KeyStore
+                val existingAliases = listAllKeyAliases()
+                if (existingAliases.isNotEmpty()) {
+                    Log.w(TAG, "Found keys in KeyStore but no alias in prefs: $existingAliases")
+                    // If we find keys, use the first one (this is a fallback)
+                    val recoveredAlias = existingAliases.first()
+                    Log.d(TAG, "Attempting to use recovered alias: $recoveredAlias")
+                    prefs.edit().putString("key_alias", recoveredAlias).apply()
+                } else {
+                    Log.e(TAG, "No keys found in Android KeyStore either!")
+                    // Without the key alias, we can't sign future requests
+                    // But we can still update the QR code for display purposes
+                }
+            }
+
+            // Only delete the QR file
+            val identityFile = File(context.filesDir, identityFileName)
+            if (identityFile.exists()) {
+                identityFile.delete()
+                Log.d(TAG, "Deleted old QR code file")
+            }
+
+            // Generate new QR code with extended JWT
+            val newQrBitmap = generateQRCode(newJwt)
+            if (newQrBitmap == null) {
+                Log.e(TAG, "Failed to generate new QR code after login")
+                return false
+            }
+
+            // Save the new QR code to internal storage
+            val savedFile = saveBitmapToInternalStorage(context, newQrBitmap, identityFileName)
+            if (savedFile == null) {
+                Log.e(TAG, "Failed to save new QR code to internal storage")
+                return false
+            }
+
+            // Update the registration JWT in preferences
+            prefs.edit().putString("registration_jwt", newJwt).apply()
+
+            // Final verification - check if we can actually use the private key
+            val finalKeyAlias = prefs.getString("key_alias", null)
+            val keyUsable = finalKeyAlias != null && CryptoUtils.doesKeyExist(finalKeyAlias)
+
+            Log.d(TAG, "Successfully updated QR code with extended lifetime")
+            Log.d(TAG, "Private key reference preserved: ${finalKeyAlias != null}")
+            Log.d(TAG, "Private key usable in KeyStore: $keyUsable")
+            Log.d(TAG, "Final key alias: $finalKeyAlias")
+
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during login completion handling", e)
+            false
+        }
+    }
+
+    // Add this function to Controller.kt to list KeyStore aliases
+    private fun listAllKeyAliases(): List<String> {
+        return try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+
+            val aliases = mutableListOf<String>()
+            val enumeration = keyStore.aliases()
+            while (enumeration.hasMoreElements()) {
+                aliases.add(enumeration.nextElement())
+            }
+            Log.d(TAG, "All KeyStore aliases: $aliases")
+            aliases
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to list key aliases", e)
+            emptyList()
+        }
+    }
+
     // Decode QR code from bitmap with enhanced validation
     fun decodeQRCodeFromBitmap(bitmap: Bitmap): String? {
         return try {
@@ -237,28 +343,6 @@ object Controller {
         } catch (e: Exception) {
             Log.e(TAG, "Error converting URI to bitmap", e)
             null
-        }
-    }
-
-    // Cleanup all identity data (for logout or re-registration)
-    fun cleanupAllIdentityData(context: Context, identityFileName: String) {
-        try {
-            // Delete internal storage file
-            val identityFile = File(context.filesDir, identityFileName)
-            if (identityFile.exists()) {
-                identityFile.delete()
-                Log.d(TAG, "Deleted identity file from internal storage.")
-            }
-
-            // Clear all stored preferences
-            val prefs = context.getSharedPreferences("anonymous_prefs", Context.MODE_PRIVATE)
-            prefs.edit().clear().apply()
-            Log.d(TAG, "Cleared all identity preferences.")
-
-            // TODO: Optionally delete from gallery (more complex due to content provider permissions)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during complete identity cleanup", e)
         }
     }
 }

@@ -80,4 +80,45 @@ object CryptoUtils {
             null
         }
     }
+
+    // Debugger
+    fun doesKeyExist(alias: String): Boolean {
+        return try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+            keyStore.containsAlias(alias)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check if key exists", e)
+            false
+        }
+    }
+    fun debugKeyStoreStatus(): Map<String, Any> {
+        return try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+
+            val aliases = mutableListOf<String>()
+            val privateKeys = mutableListOf<String>()
+            val enumeration = keyStore.aliases()
+
+            while (enumeration.hasMoreElements()) {
+                val alias = enumeration.nextElement()
+                aliases.add(alias)
+
+                if (keyStore.entryInstanceOf(alias, KeyStore.PrivateKeyEntry::class.java)) {
+                    val privateKey = getPrivateKey(alias)
+                    privateKeys.add("$alias: ${privateKey != null}")
+                }
+            }
+
+            mapOf(
+                "total_aliases" to aliases.size,
+                "aliases" to aliases,
+                "private_keys" to privateKeys
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to debug KeyStore status", e)
+            emptyMap()
+        }
+    }
 }
