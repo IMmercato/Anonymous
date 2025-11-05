@@ -8,33 +8,37 @@ import {
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { UseGuards } from '@nestjs/common';
+import { UseGuards, UnauthorizedException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AuthService } from '../auth/auth.service';
+import { JwtPayloadCustom } from '../auth/jwt-payload.interface';
+import { verifyJwt } from '../auth/jwt.util';
 
 @WebSocketGateway({
   cors: {
     origin: '*',
   },
 })
-export class MessageGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class MessageGateway
+  implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
-  server: Server;
+  server!: Server;
 
-  private connectedUsers: Map<string, string> = new Map(); // socketId -> userId
+  // socketId -> userId
+  private connectedUsers: Map<string, string> = new Map();
 
-  constructor(private authService: AuthService) {}
+  constructor(private authService: AuthService) { }
 
   async handleConnection(client: Socket) {
     try {
-      const token = client.handshake.auth.token;
+      const token = client.handshake.auth?.token;
       if (!token) {
         client.disconnect();
         return;
       }
 
-      const payload = this.authService.verifyJwt(token);
-      if (!payload) {
+      const payload = verifyJwt(token) as JwtPayloadCustom;
+      if (!payload?.uuid) {
         client.disconnect();
         return;
       }
@@ -42,6 +46,7 @@ export class MessageGateway implements OnGatewayConnection, OnGatewayDisconnect 
       this.connectedUsers.set(client.id, payload.uuid);
       console.log(`Client connected: ${client.id}, User: ${payload.uuid}`);
     } catch (e) {
+      console.error('Connection error:', e);
       client.disconnect();
     }
   }
@@ -59,7 +64,7 @@ export class MessageGateway implements OnGatewayConnection, OnGatewayDisconnect 
   ) {
     const senderId = this.connectedUsers.get(client.id);
     if (!senderId) {
-      return { error: 'Not authenticated' };
+      throw new UnauthorizedException('Not authenticated');
     }
 
     // Emit to the receiver if they're connected

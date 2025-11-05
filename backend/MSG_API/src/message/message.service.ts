@@ -4,7 +4,9 @@ import { Message, Prisma } from '@prisma/client';
 
 @Injectable()
 export class MessageService {
-  constructor(private prisma: PrismaService) {}
+  constructor(private prisma: PrismaService) {
+    console.log('MessageService initialized, prisma:', !!prisma);
+  }
 
   async sendMessage(
     senderId: string,

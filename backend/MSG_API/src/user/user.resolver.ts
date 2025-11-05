@@ -1,15 +1,15 @@
 import { Resolver, Query, Mutation, Args } from '@nestjs/graphql';
 import {
-ParseUUIDPipe,
-BadRequestException,
-NotFoundException,
+    ParseUUIDPipe,
+    BadRequestException,
+    NotFoundException,
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { UserService } from './user.service';
 
 @Resolver('User')
 export class UserResolver {
-    constructor(private readonly userService: UserService) {}
+    constructor(private readonly userService: UserService) { }
 
     @Query('listUsers')
     async listUsers() {
@@ -18,7 +18,7 @@ export class UserResolver {
 
     @Query('getUser')
     async getUser(
-    @Args('id', new ParseUUIDPipe({ version: '4' })) id: string,
+        @Args('id', new ParseUUIDPipe({ version: '4' })) id: string,
     ) {
         try {
             const user = await this.userService.findOneById(id);
@@ -45,7 +45,7 @@ export class UserResolver {
 
     @Mutation('deleteUser')
     async deleteUser(
-    @Args('id', new ParseUUIDPipe({ version: '4' })) id: string,
+        @Args('id', new ParseUUIDPipe({ version: '4' })) id: string,
     ) {
         try {
             return await this.userService.deleteUser(id);
