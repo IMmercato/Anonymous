@@ -1,6 +1,7 @@
 package com.example.anonymous.datastore
 
 import android.content.Context
+import android.graphics.Color.parseColor
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -11,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 
 val Context.chatDataStore: DataStore<Preferences> by preferencesDataStore(name = "chat_settings")
 val Context.communityDataStore: DataStore<Preferences> by preferencesDataStore(name = "community_settings")
@@ -39,12 +41,32 @@ private val POST_CARD_COLOR = stringPreferencesKey("post_card_color")
 private val TEXT_SIZE = intPreferencesKey("text_size")
 private val SHOW_IMAGES = booleanPreferencesKey("show_images")
 
-// Function to safely parse color
+// Proper color conversion using toArgb()
+private fun Color.toHexString(): String {
+    return String.format("#%08X", this.toArgb())
+}
+
+// Function to safely parse color using toArgb() conversion
 private fun safeParseColor(colorString: String): Color {
     return try {
-        Color(android.graphics.Color.parseColor(colorString))
-    } catch (e: IllegalArgumentException) {
-        Color(0xFF4CAF50) // Default color if parsing fails
+        // Handle different color string formats
+        val cleanColor = when {
+            colorString.startsWith("#") -> colorString
+            colorString.startsWith("0x") -> "#${colorString.substring(2)}"
+            else -> "#$colorString"
+        }
+
+        // Parse the color string to integer and create Color
+        val colorInt = parseColor(cleanColor)
+        Color(colorInt)
+    } catch (e: Exception) {
+        // Return appropriate defaults based on expected color
+        when {
+            colorString.contains("4CAF50", ignoreCase = true) -> Color(0xFF4CAF50) // Green
+            colorString.contains("2196F3", ignoreCase = true) -> Color(0xFF2196F3) // Blue
+            colorString.contains("F5F5F5", ignoreCase = true) -> Color(0xFFF5F5F5) // Light Gray
+            else -> Color(0xFF4CAF50) // Default fallback
+        }
     }
 }
 
@@ -52,8 +74,8 @@ private fun safeParseColor(colorString: String): Color {
 fun getChatCustomizationSettings(context: Context): Flow<ChatCustomizationSettings> {
     return context.chatDataStore.data.map { preferences ->
         ChatCustomizationSettings(
-            sentBubbleColor = safeParseColor(preferences[SENT_BUBBLE_COLOR] ?: "#4CAF50"),
-            receivedBubbleColor = safeParseColor(preferences[RECEIVED_BUBBLE_COLOR] ?: "#2196F3"),
+            sentBubbleColor = safeParseColor(preferences[SENT_BUBBLE_COLOR] ?: "#FF4CAF50"),
+            receivedBubbleColor = safeParseColor(preferences[RECEIVED_BUBBLE_COLOR] ?: "#FF2196F3"),
             isSentRightAligned = preferences[IS_SENT_RIGHT_ALIGNED] ?: true
         )
     }
@@ -64,8 +86,8 @@ suspend fun saveChatCustomizationSettings(
     settings: ChatCustomizationSettings
 ) {
     context.chatDataStore.edit { preferences ->
-        preferences[SENT_BUBBLE_COLOR] = settings.sentBubbleColor.toString()
-        preferences[RECEIVED_BUBBLE_COLOR] = settings.receivedBubbleColor.toString()
+        preferences[SENT_BUBBLE_COLOR] = settings.sentBubbleColor.toHexString()
+        preferences[RECEIVED_BUBBLE_COLOR] = settings.receivedBubbleColor.toHexString()
         preferences[IS_SENT_RIGHT_ALIGNED] = settings.isSentRightAligned
     }
 }
@@ -74,7 +96,7 @@ suspend fun saveChatCustomizationSettings(
 fun getCommunityCustomizationSettings(context: Context): Flow<CommunityCustomizationSettings> {
     return context.communityDataStore.data.map { preferences ->
         CommunityCustomizationSettings(
-            postCardColor = safeParseColor(preferences[POST_CARD_COLOR] ?: "#F5F5F5"),
+            postCardColor = safeParseColor(preferences[POST_CARD_COLOR] ?: "#FFF5F5F5"),
             textSize = preferences[TEXT_SIZE] ?: 14,
             showImages = preferences[SHOW_IMAGES] ?: true
         )
@@ -86,7 +108,7 @@ suspend fun saveCommunityCustomizationSettings(
     settings: CommunityCustomizationSettings
 ) {
     context.communityDataStore.edit { preferences ->
-        preferences[POST_CARD_COLOR] = settings.postCardColor.toString()
+        preferences[POST_CARD_COLOR] = settings.postCardColor.toHexString()
         preferences[TEXT_SIZE] = settings.textSize
         preferences[SHOW_IMAGES] = settings.showImages
     }
