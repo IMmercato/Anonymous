@@ -67,7 +67,6 @@ import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.MessageRepository
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -95,6 +94,7 @@ fun ChatScreen(
     var message by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
+    var lastRefreshTime by remember { mutableStateOf(System.currentTimeMillis()) }
     val coroutineScope = rememberCoroutineScope()
 
     val iconList = listOf(
@@ -113,37 +113,43 @@ fun ChatScreen(
     // Load messages on start
     LaunchedEffect(contactId) {
         // Load from local database first
-        val contactMessages = messageRepository.getMessagesForContact(contactId)
-            .firstOrNull() ?: emptyList()
-
-        messages = contactMessages
+        val localMessages = messageRepository.getMessagesForContact(contactId)
+        messages = localMessages
 
         // Then try to refresh from server
-        coroutineScope.launch {
-            try {
-                val serverMessages = messageService.fetchMessagesForContact(contactId)
-                if (serverMessages.isNotEmpty()) {
-                    messages = serverMessages
-                    // Save to local database
-                    serverMessages.forEach { messageRepository.addMessage(it) }
-                }
-            } catch (e: Exception) {
-                Log.e("ChatScreen", "Error loading messages", e)
+        try {
+            val serverMessages = messageService.fetchMessagesForContact(contactId)
+            if (serverMessages.isNotEmpty()) {
+                // Save new messages to local database
+                messageRepository.addMessages(serverMessages)
+
+                // Update UI with merged messages
+                val updatedMessages = messageRepository.getMessagesForContact(contactId)
+                messages = updatedMessages
+
+                lastRefreshTime = System.currentTimeMillis()
             }
+        } catch (e: Exception) {
+            Log.e("ChatScreen", "Error refreshing messages", e)
         }
     }
 
-    // Set up periodic refresh (every 5 seconds)
+    // Auto-refresh messages
     LaunchedEffect(contactId) {
         while (true) {
-            delay(5000)
-            coroutineScope.launch {
+            delay(10000)
+            if (System.currentTimeMillis() - lastRefreshTime > 5000) {
                 try {
                     val serverMessages = messageService.fetchMessagesForContact(contactId)
                     if (serverMessages.isNotEmpty()) {
-                        messages = serverMessages
-                        // Save to local database
-                        serverMessages.forEach { messageRepository.addMessage(it) }
+                        // Save new messages to local database
+                        messageRepository.addMessages(serverMessages)
+
+                        // Update UI with merged messages
+                        val updatedMessages = messageRepository.getMessagesForContact(contactId)
+                        messages = updatedMessages
+
+                        lastRefreshTime = System.currentTimeMillis()
                     }
                 } catch (e: Exception) {
                     Log.e("ChatScreen", "Error refreshing messages", e)
