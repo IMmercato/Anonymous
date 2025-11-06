@@ -18,8 +18,11 @@ model User {
 
 model Message {
   id          String   @id @default(uuid())
-  content     String   // Plaintext for moderation (optional)
-  encryptedContent String   // Actual encrypted message
+  encryptedContent String   // Encrypted message
+  iv          String
+  authTag     String
+  version     Int
+  dhPublicKey String?
   sender      User     @relation("sentMessages", fields: [senderId], references: [id])
   senderId    String
   receiver    User     @relation("receivedMessages", fields: [receiverId], references: [id])
@@ -28,6 +31,7 @@ model Message {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  @@map("messages")
   @@index([senderId])
   @@index([receiverId])
 }

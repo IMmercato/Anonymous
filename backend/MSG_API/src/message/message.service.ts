@@ -8,16 +8,22 @@ export class MessageService {
     console.log('MessageService initialized, prisma:', !!prisma);
   }
 
-  async sendMessage(
+  async sendEncryptedMessage(
     senderId: string,
     receiverId: string,
-    content: string,
     encryptedContent: string,
+    iv: string,
+    authTag: string,
+    version: number,
+    dhPublicKey?: string
   ): Promise<Message> {
     return this.prisma.message.create({
       data: {
-        content,
         encryptedContent,
+        iv,
+        authTag,
+        version,
+        dhPublicKey,
         senderId,
         receiverId,
       },

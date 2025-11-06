@@ -11,16 +11,22 @@ export class MessageResolver {
   @Mutation('sendMessage')
   async sendMessage(
     @Args('receiverId') receiverId: string,
-    @Args('content') content: string,
     @Args('encryptedContent') encryptedContent: string,
+    @Args('iv') iv: string,
+    @Args('authTag') authTag: string,
+    @Args('version') version: string,
+    @Args('dhPublicKey') dhPublicKey: string,
     @Context() context: any,
   ) {
     const senderId = context.req.user.uuid;
-    return this.messageService.sendMessage(
+    return this.messageService.sendEncryptedMessage(
       senderId,
       receiverId,
-      content,
       encryptedContent,
+      iv,
+      authTag,
+      parseInt(version, 10),
+      dhPublicKey
     );
   }
 
@@ -43,12 +49,12 @@ export class MessageResolver {
     const userId = context.req.user.uuid;
     return this.messageService.getUnreadMessages(userId);
   }
+
   @UseGuards(JwtAuthGuard)
   @Mutation('markMessageAsRead')
   async markMessageAsRead(
     @Args('messageId') messageId: string,
     @Context() context: any,
-
   ) {
     const userId = context.req.user.uuid;
     const message = await this.messageService.getMessageById(messageId);

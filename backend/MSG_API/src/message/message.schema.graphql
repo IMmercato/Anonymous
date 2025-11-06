@@ -1,7 +1,10 @@
 type Message {
   id: ID!
-  content: String!
   encryptedContent: String!
+  iv: String!
+  authTag: String!
+  version: Int!
+  dhPublicKey: String
   sender: User!
   receiver: User!
   isRead: Boolean!
@@ -17,8 +20,11 @@ extend type Query {
 extend type Mutation {
   sendMessage(
     receiverId: ID!
-    content: String!
     encryptedContent: String!
+    iv: String!
+    authTag: String!
+    version: Int!
+    dhPublicKey: String
   ): Message!
   markMessageAsRead(messageId: ID!): Message!
 }
