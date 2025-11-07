@@ -7,7 +7,6 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.anonymous.network.model.Message
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.encodeToString
@@ -21,17 +20,27 @@ class MessageRepository(private val context: Context) {
 
     suspend fun addMessage(message: Message) {
         val currentMessages = getAllMessages().toMutableList()
-        currentMessages.add(message)
-        saveMessages(currentMessages)
+        if (currentMessages.none { it.id == message.id }) {
+            currentMessages.add(message)
+            saveMessages(currentMessages)
+        }
     }
 
-    fun getMessagesForContact(contactId: String): Flow<List<Message>> {
-        return context.messagesDataStore.data.map { preferences ->
-            preferences[MESSAGES_KEY]?.let { jsonString ->
-                json.decodeFromString<List<Message>>(jsonString)
-                    .filter { it.senderId == contactId || it.receiverId == contactId }
-            } ?: emptyList()
+    suspend fun addMessages(messages: List<Message>) {
+        val currentMessages = getAllMessages().toMutableList()
+        val newMessages = messages.filter { newMessage ->
+            currentMessages.none { it.id == newMessage.id }
         }
+        if (newMessages.isNotEmpty()) {
+            currentMessages.addAll(newMessages)
+            saveMessages(currentMessages)
+        }
+    }
+
+    suspend fun getMessagesForContact(contactId: String): List<Message> {
+        return getAllMessages().filter {
+            it.senderId == contactId || it.receiverId == contactId
+        }.sortedBy { it.timestamp }
     }
 
     private suspend fun getAllMessages(): List<Message> {
@@ -44,7 +53,7 @@ class MessageRepository(private val context: Context) {
 
     private suspend fun saveMessages(messages: List<Message>) {
         context.messagesDataStore.edit { preferences ->
-            preferences[MESSAGES_KEY] = json.encodeToString(messages)
+            preferences[MESSAGES_KEY] = json.encodeToString(messages.distinctBy { it.id })
         }
     }
 }
