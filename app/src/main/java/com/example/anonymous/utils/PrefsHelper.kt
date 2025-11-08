@@ -71,10 +71,15 @@ object PrefsHelper {
             )
             val spec = KeyGenParameterSpec.Builder(
                 alias,
-                KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_DECRYPT
+                KeyProperties.PURPOSE_SIGN or
+                        KeyProperties.PURPOSE_VERIFY or
+                        KeyProperties.PURPOSE_ENCRYPT or
+                        KeyProperties.PURPOSE_DECRYPT
             )
                 .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA512)
+                .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
+                .setKeySize(2048)
                 .build()
 
             kpg.initialize(spec)
