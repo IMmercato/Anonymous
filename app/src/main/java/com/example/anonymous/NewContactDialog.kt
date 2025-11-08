@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.anonymous.controller.Controller
+import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.utils.JwtUtils
@@ -149,9 +150,14 @@ fun NewContactDialog(
                                         val newContact = Contact(
                                             uuid = uuid,
                                             name = contactName,
-                                            publicKey = "" // fetch from API later
+                                            publicKey = scannedPublicKey ?: ""  // Save the public key from QR code
                                         )
                                         contactRepository.addContact(newContact)
+
+                                        // Generate key pair for this contact
+                                        val keyPair = CryptoManager.generateECDHKeyPair()
+                                        CryptoManager.saveKeyPair(context, uuid, keyPair)
+
                                         onContactAdded(newContact)
                                         onDismiss()
                                     } else {

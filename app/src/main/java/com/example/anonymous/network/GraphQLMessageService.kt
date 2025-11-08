@@ -2,6 +2,7 @@ package com.example.anonymous.network
 
 import android.content.Context
 import android.util.Log
+import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.network.model.*
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.Dispatchers
@@ -21,36 +22,30 @@ class GraphQLMessageService(private val context: Context) {
                     return@withContext false
                 }
 
-                Log.d(TAG, "Sending message to: $receiverId")
-                Log.d(TAG, "Message content: $content")
-                Log.d(TAG, "Session token: ${sessionToken.take(10)}...")
+                val cryptoService = GraphQLCryptoService(context)
+                val encryptedData = cryptoService.sendEncryptedMessage(receiverId, content)
 
-                val query = """
-                    mutation SendMessage(${'$'}receiverId: ID!, ${'$'}content: String!, ${'$'}encryptedContent: String!) {
-                        sendMessage(
-                            receiverId: ${'$'}receiverId,
-                            content: ${'$'}content,
-                            encryptedContent: ${'$'}encryptedContent
-                        ) {
-                            id
-                            content
-                            encryptedContent
-                            sender {
-                                id
-                            }
-                            receiver {
-                                id
-                            }
-                            isRead
-                            createdAt
-                        }
-                    }
-                """.trimIndent()
+                Log.d(TAG, "Sending ENCRYPTED message to: $receiverId")
+                Log.d(TAG, "Original content: $content")
+                Log.d(TAG, "Encrypted content length: ${encryptedData.encryptedContent.length}")
+
+
+                val query = QueryBuilder.sendEncryptedMessage(
+                    receiverId = receiverId,
+                    encryptedContent = encryptedData.encryptedContent,
+                    iv = encryptedData.iv,
+                    authTag = encryptedData.authTag,
+                    version = encryptedData.version,
+                    dhPublicKey = encryptedData.dhPublicKey
+                )
 
                 val variables = mapOf(
                     "receiverId" to receiverId,
-                    "content" to content,
-                    "encryptedContent" to content
+                    "encryptedContent" to encryptedData.encryptedContent,
+                    "iv" to encryptedData.iv,
+                    "authTag" to encryptedData.authTag,
+                    "version" to encryptedData.version,
+                    "dhPublicKey" to encryptedData.dhPublicKey
                 )
 
                 Log.d(TAG, "GraphQL Query: $query")
@@ -62,15 +57,15 @@ class GraphQLMessageService(private val context: Context) {
                 logResponseDetails(response)
 
                 if (response.isSuccessful && response.body()?.errors.isNullOrEmpty()) {
-                    Log.d(TAG, "Message sent successfully")
+                    Log.d(TAG, "Encrypted message sent successfully")
                     true
                 } else {
                     val errorBody = response.errorBody()?.string()
-                    Log.e(TAG, "Failed to send message: $errorBody")
+                    Log.e(TAG, "Failed to send encrypted message: $errorBody")
                     false
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error sending message", e)
+                Log.e(TAG, "Error sending encrypted message", e)
                 false
             }
         }
@@ -86,38 +81,42 @@ class GraphQLMessageService(private val context: Context) {
                     return@withContext emptyList()
                 }
 
-                val query = """
-                    query GetMessages {
-                        getMessages(receiverId: "$userId") {
-                            id
-                            content
-                            encryptedContent
-                            sender {
-                                id
-                            }
-                            receiver {
-                                id
-                            }
-                            isRead
-                            createdAt
-                        }
-                    }
-                """.trimIndent()
-
+                val query = QueryBuilder.getEncryptedMessages(userId)
                 val request = GraphQLRequest(query)
                 val response: Response<GraphQLResponse<GetMessagesData>> = service.getMessages(request)
 
                 if (response.isSuccessful && response.body()?.errors.isNullOrEmpty()) {
-                    response.body()?.data?.getMessages?.map { messageResponse ->
-                        Message(
-                            id = messageResponse.id,
-                            content = messageResponse.content,
-                            encryptedContent = messageResponse.encryptedContent,
-                            senderId = messageResponse.sender?.id ?: "",
-                            receiverId = messageResponse.receiver?.id ?: "",
-                            timestamp = parseTimestamp(messageResponse.createdAt),
-                            isRead = messageResponse.isRead
-                        )
+                    val cryptoService = GraphQLCryptoService(context)
+
+                    response.body()?.data?.getMessages?.mapNotNull { messageResponse ->
+                        try {
+                            // Decrypt the message
+                            val encryptedData = EncryptedMessageData(
+                                encryptedContent = messageResponse.encryptedContent,
+                                iv = messageResponse.iv,
+                                authTag = messageResponse.authTag,
+                                version = messageResponse.version,
+                                dhPublicKey = messageResponse.dhPublicKey,
+                                senderId = messageResponse.sender?.id ?: ""
+                            )
+
+                            val decryptedContent = cryptoService.decryptMessage(encryptedData)
+
+                            Message(
+                                id = messageResponse.id,
+                                content = decryptedContent, // Store decrypted content locally
+                                encryptedContent = messageResponse.encryptedContent,
+                                senderId = messageResponse.sender?.id ?: "",
+                                receiverId = messageResponse.receiver?.id ?: "",
+                                timestamp = parseTimestamp(messageResponse.createdAt),
+                                isRead = messageResponse.isRead,
+                                iv = messageResponse.iv,
+                                dhPublicKey = messageResponse.dhPublicKey
+                            )
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to decrypt message ${messageResponse.id}", e)
+                            null
+                        }
                     } ?: emptyList()
                 } else {
                     val errorBody = response.errorBody()?.string()

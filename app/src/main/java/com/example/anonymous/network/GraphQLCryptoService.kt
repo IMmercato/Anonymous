@@ -10,8 +10,13 @@ import android.util.Base64
 import android.util.Log
 import com.example.anonymous.utils.PrefsHelper
 import java.security.KeyFactory
-import java.security.KeyFactory.getInstance
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.SecureRandom
 import java.security.spec.X509EncodedKeySpec
+import javax.crypto.Cipher
+import javax.crypto.SecretKey
+import javax.crypto.spec.SecretKeySpec
 
 class GraphQLCryptoService(private val context: Context) {
     private val TAG = "GraphQLCryptoService"
@@ -25,34 +30,24 @@ class GraphQLCryptoService(private val context: Context) {
                 throw IllegalStateException("No public key found for contact: $receiverId")
             }
 
-            // Generate or get key pair for this receiver
-            var keyPair = CryptoManager.getKeyPair(context, receiverId)
-            if (keyPair == null) {
-                keyPair = CryptoManager.generateECDHKeyPair()
-                CryptoManager.saveKeyPair(context, receiverId, keyPair)
-            }
-
-            // Get receiver's public key
+            // Decode RSA public key
             val receiverPublicKey = decodePublicKey(receiverContact.publicKey)
 
-            // Perform ECDH key exchange
-            val sharedSecret = CryptoManager.performECDH(keyPair.private, receiverPublicKey)
+            // Generate an ephemeral (one-time use) AES key
+            val aesKey = generateEphemeralAESKey()
 
-            // Derive AES key
-            val salt = ("dm:$receiverId").toByteArray(Charsets.UTF_8)
-            val currentUserId = PrefsHelper.getUserUuid(context) ?: ""
-            val info = ("msg:$currentUserId->$receiverId").toByteArray(Charsets.UTF_8)
-            val aesKey = CryptoManager.deriveAESKey(sharedSecret, salt, info)
-
-            // Encrypt the message
+            // Encrypt the message with AES-GCM
             val encryptedData = CryptoManager.encryptMessage(content, aesKey)
+
+            // Encrypt the AES key with RSA
+            val encryptedAesKey = encryptWithRSA(aesKey.encoded, receiverPublicKey)
 
             EncryptedMessageData(
                 encryptedContent = encryptedData.ct,
                 iv = encryptedData.iv,
                 authTag = encryptedData.authTag,
                 version = encryptedData.v,
-                dhPublicKey = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP)
+                dhPublicKey = Base64.encodeToString(encryptedAesKey, Base64.NO_WRAP)
             )
         } catch (e: Exception) {
             Log.e(TAG, "Encryption failed for receiver $receiverId", e)
@@ -62,27 +57,13 @@ class GraphQLCryptoService(private val context: Context) {
 
     suspend fun decryptMessage(encryptedMessage: EncryptedMessageData): String {
         return try {
-            // Get sender's contact to retrieve their public key
-            val senderContact = getContact(encryptedMessage.senderId)
-            if (senderContact == null ||  senderContact.publicKey.isBlank()) {
-                throw IllegalStateException("No public key found for sender: ${encryptedMessage.senderId}")
-            }
+            // Get our own RSA private key
+            val myPrivateKey = getMyPrivateKey()
 
-            // Get key pair for this sender
-            val keyPair= CryptoManager.getKeyPair(context, encryptedMessage.senderId)
-                ?: throw IllegalStateException("No key pair found for sender: ${encryptedMessage.senderId}")
-
-            // Get sender's public key
-            val senderPublicKey = decodePublicKey(senderContact.publicKey)
-
-            // Perform ECDH key exchange
-            val sharedSecret = CryptoManager.performECDH(keyPair.private, senderPublicKey)
-
-            // Derive AES key
-            val salt = ("dm:${encryptedMessage.senderId}").toByteArray(Charsets.UTF_8)
-            val currentUserId = PrefsHelper.getUserUuid(context) ?: ""
-            val info = ("msg:${encryptedMessage.senderId}->$currentUserId").toByteArray(Charsets.UTF_8)
-            val aesKey = CryptoManager.deriveAESKey(sharedSecret, salt, info)
+            // Decrypt the AES key using our private key
+            val encryptedAesKeyBytes = Base64.decode(encryptedMessage.dhPublicKey, Base64.NO_WRAP)
+            val aesKeyBytes = decryptWithRSA(encryptedAesKeyBytes, myPrivateKey)
+            val aesKey = SecretKeySpec(aesKeyBytes, "AES")
 
             val encryptedData = CryptoManager.EncryptedMessage(
                 v = encryptedMessage.version,
@@ -96,6 +77,31 @@ class GraphQLCryptoService(private val context: Context) {
             Log.e(TAG, "Decryption failed for sender ${encryptedMessage.senderId}", e)
             throw e
         }
+    }
+
+    private fun generateEphemeralAESKey(): SecretKey {
+        val keyBytes = ByteArray(32) // 256-bit
+        SecureRandom().nextBytes(keyBytes)
+        return SecretKeySpec(keyBytes, "AES")
+    }
+
+    private fun encryptWithRSA(data: ByteArray, publicKey: PublicKey): ByteArray {
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
+        return cipher.doFinal(data)
+    }
+
+    private fun decryptWithRSA(encryptedData: ByteArray, privateKey: PrivateKey): ByteArray {
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.DECRYPT_MODE, privateKey)
+        return cipher.doFinal(encryptedData)
+    }
+
+    private fun getMyPrivateKey(): PrivateKey {
+        // Get your own private key from Android Keystore
+        val alias = PrefsHelper.getKeyAlias(context) ?: throw IllegalStateException("No key alias found")
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        return ks.getKey(alias, null) as PrivateKey
     }
 
     private suspend fun getContact(contactId: String): Contact? {

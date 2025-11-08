@@ -2,6 +2,7 @@ package com.example.anonymous.crypto
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import com.example.anonymous.utils.PrefsHelper
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -28,13 +29,15 @@ object CryptoManager {
         val v: Int,              // version
         val iv: String,          // base64
         val ct: String,          // base64 (ciphertext || tag)
+        val authTag: String,     // base64 authentication tag
         val aad: String? = null  // optional base64
     )
 
     // Generate ECDH P-256 key pair (use X25519 later)
     fun generateECDHKeyPair(): KeyPair {
         val kpg = KeyPairGenerator.getInstance("EC")
-        kpg.initialize(256)
+        val ecSpec = java.security.spec.ECGenParameterSpec("secp256r1") // Use named curve
+        kpg.initialize(ecSpec, SecureRandom())
         return kpg.generateKeyPair()
     }
 
@@ -80,11 +83,15 @@ object CryptoManager {
         val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
         cipher.init(Cipher.ENCRYPT_MODE, key, spec)
         if (aad != null) cipher.updateAAD(aad)
-        val ct = cipher.doFinal(message.toByteArray(Charsets.UTF_8))
+        val encrypted = cipher.doFinal(message.toByteArray(Charsets.UTF_8))
+        val ctLength = encrypted.size - GCM_TAG_LENGTH_BITS / 8
+        val ct = encrypted.copyOf(ctLength)
+        val authTag = encrypted.copyOfRange(ctLength, encrypted.size)
         return EncryptedMessage(
             v = FORMAT_VERSION,
             iv = Base64.encodeToString(iv, Base64.NO_WRAP),
             ct = Base64.encodeToString(ct, Base64.NO_WRAP),
+            authTag = Base64.encodeToString(authTag, Base64.NO_WRAP),
             aad = aad?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
         )
     }
@@ -93,39 +100,59 @@ object CryptoManager {
         require(encrypted.v == FORMAT_VERSION) { "Unsupported ciphertext version: ${encrypted.v}" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         val iv = Base64.decode(encrypted.iv, Base64.NO_WRAP)
-        val ct = Base64.decode(encrypted.ct, Base64.NO_WRAP)
+        val ciphertext = Base64.decode(encrypted.ct, Base64.NO_WRAP)
+        val authTag = Base64.decode(encrypted.authTag, Base64.NO_WRAP)
+        val combined = ciphertext + authTag
         val spec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv)
         cipher.init(Cipher.DECRYPT_MODE, key, spec)
         encrypted.aad?.let { cipher.updateAAD(Base64.decode(it, Base64.NO_WRAP)) }
-        val pt = cipher.doFinal(ct) // throws on tag failure
+        val pt = cipher.doFinal(combined) // throws on tag failure
         return String(pt, Charsets.UTF_8)
     }
 
     // Store per-contact key pairs in EncryptedSharedPreferences, not plain SharedPreferences
     fun saveKeyPair(context: Context, contactId: String, keyPair: KeyPair) {
         val prefs = PrefsHelper.getSecurePrefs(context)
+
+        // Use proper encoding for EC public keys - ensure X.509 format
         val pubB64 = Base64.encodeToString(keyPair.public.encoded, Base64.NO_WRAP)
+
+        // For private key, use PKCS#8 format
         val privB64 = Base64.encodeToString(keyPair.private.encoded, Base64.NO_WRAP)
+
         prefs.edit()
             .putString("${contactId}_public", pubB64)
             .putString("${contactId}_private", privB64)
             .apply()
+
+        Log.d("CryptoManager", "Saved key pair for contact: $contactId")
+        Log.d("CryptoManager", "Public key format: ${keyPair.public.format}")
+        Log.d("CryptoManager", "Public key algorithm: ${keyPair.public.algorithm}")
     }
 
     fun getKeyPair(context: Context, contactId: String): KeyPair? {
         val prefs = PrefsHelper.getSecurePrefs(context)
         val pubStr = prefs.getString("${contactId}_public", null)
         val privStr = prefs.getString("${contactId}_private", null)
-        if (pubStr == null || privStr == null) return null
 
-        val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
-        val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
+        if (pubStr == null || privStr == null) {
+            Log.d("CryptoManager", "No key pair found for contact: $contactId")
+            return null
+        }
 
-        val pubKey = KeyFactory.getInstance("EC")
-            .generatePublic(X509EncodedKeySpec(pubBytes))
-        val privKey = KeyFactory.getInstance("EC")
-            .generatePrivate(PKCS8EncodedKeySpec(privBytes))
+        return try {
+            val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
+            val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
 
-        return KeyPair(pubKey, privKey)
+            val keyFactory = KeyFactory.getInstance("EC")
+
+            val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
+            val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
+
+            KeyPair(pubKey, privKey)
+        } catch (e: Exception) {
+            Log.e("CryptoManager", "Error loading key pair for $contactId", e)
+            null
+        }
     }
 }
