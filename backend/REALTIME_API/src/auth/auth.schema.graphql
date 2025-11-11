@@ -1,0 +1,18 @@
+type AuthPayload {
+    jwt: String!
+}
+
+type NoncePayload {
+    nonce: String!
+}
+
+type SessionPayload {
+    token: String!
+    qrToken: String!
+}
+
+type Mutation {
+    registerUser(publicKey: String!): AuthPayload!
+    loginWithJwt(jwt: String!): NoncePayload!
+    completeLogin(uuid: ID!, signature: String!): SessionPayload
+}

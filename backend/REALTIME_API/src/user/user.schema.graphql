@@ -1,0 +1,31 @@
+scalar DateTime
+
+type User {
+  id: ID!
+  publicKey: String!
+  createdAt: DateTime!
+}
+
+type Message {
+  id: ID!
+  content: String!
+  encryptedContent: String!
+  senderId: ID!
+  receiverId: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Query {
+  listUsers: [User!]!
+  getUser(id: ID!): User
+  getMessages(receiverId: ID!): [Message!]! @auth
+  getUnreadMessages: [Message!]! @auth
+}
+
+type Mutation {
+  createUser(publicKey: String!): User!
+  deleteUser(id: ID!): Boolean!
+  sendMessage(receiverId: ID!, content: String!, encryptedContent: String!): Message! @auth
+  markMessageAsRead(messageId: ID!): Boolean! @auth
+}
