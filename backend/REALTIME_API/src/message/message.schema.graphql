@@ -1,6 +1,5 @@
 type Message {
   id: ID!
-  content: String!
   encryptedContent: String!
   sender: User!
   receiver: User!
@@ -17,12 +16,11 @@ extend type Query {
 extend type Mutation {
   sendMessage(
     receiverId: ID!
-    content: String!
     encryptedContent: String!
   ): Message!
   markMessageAsRead(messageId: ID!): Message!
 }
 
-extend type Subscription {
+type Subscription {
   newMessage: Message!
 }

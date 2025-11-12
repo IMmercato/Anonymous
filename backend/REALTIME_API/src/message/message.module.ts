@@ -1,9 +1,8 @@
 import { Module } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { MessageResolver } from './message.resolver';
+import { PubSubService } from './pubsub.service';
 import { PrismaModule } from '../prisma.module';
-import { MessageGateway } from './message.gateway';
-import { PubSubService } from './pubsub.service'
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
@@ -11,8 +10,7 @@ import { AuthModule } from '../auth/auth.module';
   providers: [
     MessageService,
     MessageResolver,
-    MessageGateway,
-    PubSubService,
+    PubSubService
   ],
 })
 

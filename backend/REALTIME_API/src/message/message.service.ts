@@ -9,16 +9,22 @@ export class MessageService {
     console.log('MessageService initialized, prisma:', !!prisma);
   }
 
-  async sendMessage(
+  async sendEncryptedMessage(
     senderId: string,
     receiverId: string,
-    content: string,
     encryptedContent: string,
+    iv: string,
+    authTag: string,
+    version: number,
+    dhPublicKey?: string
   ): Promise<Message> {
     const message = await this.prisma.message.create({
       data: {
-        content,
         encryptedContent,
+        iv,
+        authTag,
+        version,
+        dhPublicKey,
         senderId,
         receiverId,
       },
@@ -28,7 +34,6 @@ export class MessageService {
     await this.pubSub.publish('newMessage', {
       newMessage: message,
     });
-
     return message;
   }
 

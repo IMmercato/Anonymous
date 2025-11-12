@@ -19,7 +19,7 @@ import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin
         context: ({ req, res }: { req: Request; res: Response }) => ({ req, res }),
         plugins: [],
         installSubscriptionHandlers: true,
-        subscription: {
+        subscriptions: {
           'graphql-ws': true,
           'subscriptions-transport-ws': true
         }

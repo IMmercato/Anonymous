@@ -1,4 +1,4 @@
-import { Resolver, Query, Mutation, Args, Context, Subscription } from '@nestjs/graphql';
+import { Resolver, Query, Mutation, Args, Context, Subscription, ResolveField, Parent } from '@nestjs/graphql';
 import { UseGuards } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { PubSubService } from './pubsub.service';
@@ -6,30 +6,44 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 
 @Resolver('Message')
 export class MessageResolver {
-  constructor(private readonly messageService: MessageService, private readonly pubSub: PubSubService) { }
+  constructor(
+    private readonly messageService: MessageService, 
+    private readonly pubSub: PubSubService
+  ) {}
 
   @UseGuards(JwtAuthGuard)
   @Mutation('sendMessage')
   async sendMessage(
     @Args('receiverId') receiverId: string,
-    @Args('content') content: string,
     @Args('encryptedContent') encryptedContent: string,
+    @Args('iv') iv: string,
+    @Args('authTag') authTag: string,
+    @Args('version') version: string,
     @Context() context: any,
+    @Args('dhPublicKey', { nullable: true }) dhPublicKey?: string
   ) {
     const senderId = context.req.user.uuid;
-    return this.messageService.sendMessage(
+    const message = await this.messageService.sendEncryptedMessage(
       senderId,
       receiverId,
-      content,
       encryptedContent,
+      iv,
+      authTag,
+      parseInt(version, 10),
+      dhPublicKey
     );
+    await this.pubSub.publish(`newMessage:${receiverId}`, {
+      newMessage: message,
+    });
+
+    return message;
   }
 
   @UseGuards(JwtAuthGuard)
   @Query('getMessages')
   async getMessages(
     @Args('receiverId') receiverId: string,
-    @Context() context: any,
+    @Context() context: any
   ) {
     const userId = context.req.user.uuid;
     if (receiverId !== userId) {
@@ -44,12 +58,12 @@ export class MessageResolver {
     const userId = context.req.user.uuid;
     return this.messageService.getUnreadMessages(userId);
   }
+
   @UseGuards(JwtAuthGuard)
   @Mutation('markMessageAsRead')
   async markMessageAsRead(
     @Args('messageId') messageId: string,
-    @Context() context: any,
-
+    @Context() context: any
   ) {
     const userId = context.req.user.uuid;
     const message = await this.messageService.getMessageById(messageId);
@@ -77,7 +91,8 @@ export class MessageResolver {
       return payload.newMessage;
     }
   })
-  newMessage() {
-    return this.pubSub.asyncIterator('newMessage')
+  newMessage(@Context() context: any) {
+    const userId = context.req.user.uuid;
+    return this.pubSub.asyncIterableIterator('newMessage');
   }
 }
