@@ -46,6 +46,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +62,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.IconCompat
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.network.GraphQLMessageService
 import com.example.anonymous.network.model.Message
@@ -94,7 +96,7 @@ fun ChatScreen(
     var message by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
-    var lastRefreshTime by remember { mutableStateOf(System.currentTimeMillis()) }
+    var connectionStatus by remember { mutableStateOf("Connecting...") }
     val coroutineScope = rememberCoroutineScope()
 
     val iconList = listOf(
@@ -112,56 +114,79 @@ fun ChatScreen(
 
     // Load messages on start
     LaunchedEffect(contactId) {
-        // Load from local database first
-        val localMessages = messageRepository.getMessagesForContact(contactId)
-        messages = localMessages
+        // Load from local database first (decrypting them)
+        val localMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
+        messages = localMessagesDecrypted
+
+        // Initialize real-time messaging
+        messageService.initializeRealTimeMessaging(contactId)
 
         // Then try to refresh from server
         try {
-            val serverMessages = messageService.fetchMessagesForContact(contactId)
+            val serverMessages = messageService.fetchMessagesForContact(contactId) // These are already decrypted
             if (serverMessages.isNotEmpty()) {
-                // Save new messages to local database
-                messageRepository.addMessages(serverMessages)
-
-                // Update UI with merged messages
-                val updatedMessages = messageRepository.getMessagesForContact(contactId)
-                messages = updatedMessages
-
-                lastRefreshTime = System.currentTimeMillis()
+                // Add the *encrypted* versions to the repository
+                serverMessages.forEach { messageRepository.addMessage(it) }
+                // Reload and decrypt from repo for UI state
+                val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
+                messages = updatedMessagesDecrypted
             }
         } catch (e: Exception) {
             Log.e("ChatScreen", "Error refreshing messages", e)
+            // Optionally show error to user, but local messages are already loaded
         }
     }
 
-    // Auto-refresh messages
-    LaunchedEffect(contactId) {
-        while (true) {
-            delay(10000)
-            if (System.currentTimeMillis() - lastRefreshTime > 5000) {
-                try {
-                    val serverMessages = messageService.fetchMessagesForContact(contactId)
-                    if (serverMessages.isNotEmpty()) {
-                        // Save new messages to local database
-                        messageRepository.addMessages(serverMessages)
+    // Listen for real-time messages
+    LaunchedEffect(messageService) {
+        messageService.newMessages.collect { newDecryptedMessageFromServer ->
+            try {
+                // Add the *encrypted* version of the incoming message to the local repository
+                // The newDecryptedMessageFromServer contains decrypted content for UI, but the repo stores the encrypted parts.
+                // We need to reconstruct the encrypted version to save it.
+                // This assumes the service emits a message with both encrypted and decrypted content.
+                // If not, the service needs to emit the raw encrypted data along with the decrypted content.
+                // For now, let's assume the service emits the correct format for saving.
+                // The service already constructs the message with encryptedContent, iv, etc.
+                messageRepository.addMessage(newDecryptedMessageFromServer)
 
-                        // Update UI with merged messages
-                        val updatedMessages = messageRepository.getMessagesForContact(contactId)
-                        messages = updatedMessages
+                // Reload and decrypt from repo for UI state (or manage state diff more efficiently)
+                val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
+                messages = updatedMessagesDecrypted
 
-                        lastRefreshTime = System.currentTimeMillis()
-                    }
-                } catch (e: Exception) {
-                    Log.e("ChatScreen", "Error refreshing messages", e)
+                // Update connection status
+                connectionStatus = if (messageService.isRealTimeActive()) {
+                    "Connected (Real-time)"
+                } else {
+                    "Connected (Polling)"
                 }
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Error processing new message or updating UI", e)
+                connectionStatus = "Disconnected - Retrying..."
             }
+        }
+    }
+
+    // Cleanup on exit
+    DisposableEffect(Unit) {
+        onDispose {
+            messageService.stopRealTimeMessaging()
         }
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chat with $contactName") },
+                title = {
+                    Column {
+                        Text("Chat with $contactName")
+                        Text(
+                            connectionStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
@@ -277,27 +302,45 @@ fun ChatScreen(
                                     isLoading = true
                                     coroutineScope.launch {
                                         val success = messageService.sendMessage(contactId, message)
+
                                         if (success) {
-                                            // Create the Message for local storage
-                                            val newMessage = Message(
-                                                id = System.currentTimeMillis().toString(),
-                                                content = message,
-                                                encryptedContent = "", // You might want to handle encryption here
+                                            // --- SEND SUCCESS LOGIC ---
+                                            // 1. Encrypt the message again (or reuse the data sent if service provides it)
+                                            //    We already sent it encrypted via messageService.sendMessage.
+                                            //    Now we need to create the *encrypted* Message object to save locally.
+                                            val encryptedData = messageService.cryptoService.sendEncryptedMessage(contactId, message)
+
+                                            // 2. Create the *encrypted* Message object for local storage
+                                            val encryptedMessageForStorage = Message(
+                                                id = System.currentTimeMillis().toString(), // Server should provide ID, but using local as placeholder
+                                                content = "", // Leave content empty for storage, will decrypt when loaded
+                                                encryptedContent = encryptedData.encryptedContent,
                                                 senderId = currentUserId,
                                                 receiverId = contactId,
-                                                timestamp = System.currentTimeMillis(),
-                                                isRead = false
+                                                timestamp = System.currentTimeMillis(), // Server should provide timestamp, but using local as placeholder
+                                                isRead = false, // Outgoing message, initially not read by receiver
+                                                iv = encryptedData.iv,
+                                                authTag = encryptedData.authTag,
+                                                version = encryptedData.version,
+                                                dhPublicKey = encryptedData.dhPublicKey
                                             )
 
-                                            // Save to local repository
-                                            messageRepository.addMessage(newMessage)
+                                            // 3. Save the *encrypted* message to the repository
+                                            messageRepository.addMessage(encryptedMessageForStorage)
 
-                                            // Update UI with the new message
-                                            messages = messages + newMessage
+                                            // 4. Reload and decrypt from repo for UI state (or manage state diff more efficiently)
+                                            //    This ensures the message shown in the UI is consistent with what's stored.
+                                            val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
+                                            messages = updatedMessagesDecrypted
+
 
                                             // Clear input
                                             message = ""
                                             isCodeFormat = false
+                                        } else {
+                                            // Handle send failure (e.g., show error, keep message in input)
+                                            Log.e("ChatScreen", "Failed to send message")
+                                            // You might want to show a snackbar or toast
                                         }
                                         isLoading = false
                                     }
