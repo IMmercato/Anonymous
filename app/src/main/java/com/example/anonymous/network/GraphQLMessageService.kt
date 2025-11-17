@@ -2,16 +2,127 @@ package com.example.anonymous.network
 
 import android.content.Context
 import android.util.Log
-import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.network.model.*
 import com.example.anonymous.utils.PrefsHelper
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.Response
+import java.util.concurrent.atomic.AtomicBoolean
 
 class GraphQLMessageService(private val context: Context) {
     private val TAG = "GraphQLMessageService"
     private val service = GraphQLService.create(context)
+    val cryptoService = GraphQLCryptoService(context)
+    private val subscriptionService = GraphQLSubscriptionService(context)
+
+    private var isRealTimeActive = AtomicBoolean(false)
+    private var refreshJob: Job? = null
+    private var subscriptionJob: Job? = null
+
+    private val _newMessages = MutableSharedFlow<Message>()
+    val newMessages: SharedFlow<Message> = _newMessages.asSharedFlow()
+
+    suspend fun initializeRealTimeMessaging(contactId: String) {
+        Log.d(TAG, "Initializing real-time messaging...")
+
+        val webSocketSuccess = subscriptionService.initializeWebSocket()
+
+        if (webSocketSuccess) {
+            startSubscription(contactId)
+            isRealTimeActive.set(true)
+            Log.d(TAG, "Real-time messaging activated via WebSocket")
+        } else {
+            startPollingFallback(contactId)
+            Log.d(TAG, "WebSocket failed, falling back to polling")
+        }
+    }
+
+    private fun startSubscription(contactId: String) {
+        subscriptionJob = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                subscriptionService.subscribeToNewMessages().collect { subscriptionData ->
+                    val messageResponse = subscriptionData.newMessage ?: run {
+                        Log.w(TAG, "Received subscription data but 'newMessage' field was null.")
+                        return@collect
+                    }
+
+                    // Verify this message is relevant to our current contact
+                    val senderId = messageResponse.sender!!.id
+                    val receiverId = messageResponse.receiver!!.id
+
+                    if (senderId == contactId || receiverId == contactId) {
+                        try {
+                            val encryptedData = EncryptedMessageData(
+                                encryptedContent = messageResponse.encryptedContent,
+                                iv = messageResponse.iv,
+                                authTag = messageResponse.authTag,
+                                version = messageResponse.version,
+                                dhPublicKey = messageResponse.dhPublicKey,
+                                senderId = senderId
+                            )
+
+                            val decryptedContent = cryptoService.decryptMessage(encryptedData, senderId)
+
+                            val decryptedMessage = Message(
+                                id = messageResponse.id,
+                                content = decryptedContent,
+                                encryptedContent = messageResponse.encryptedContent,
+                                senderId = senderId,
+                                receiverId = receiverId,
+                                timestamp = parseTimestamp(messageResponse.createdAt),
+                                isRead = messageResponse.isRead,
+                                iv = messageResponse.iv,
+                                authTag = messageResponse.authTag,
+                                version = messageResponse.version,
+                                dhPublicKey = messageResponse.dhPublicKey
+                            )
+
+                            _newMessages.emit(decryptedMessage)
+                            Log.d(TAG, "Real-time message processed and emitted: ${decryptedMessage.id}")
+
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to decrypt real-time message ${messageResponse.id}", e)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Subscription flow error", e)
+                // Fall back to polling if subscription fails
+                startPollingFallback(contactId)
+            }
+        }
+    }
+
+    private fun startPollingFallback(contactId: String) {
+        refreshJob = CoroutineScope(Dispatchers.IO).launch {
+            while (isActive) {
+                try {
+                    val messages = fetchMessagesForContact(contactId)
+                    delay(5000)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Polling error", e)
+                    delay(10000)
+                }
+            }
+        }
+    }
+
+    fun stopRealTimeMessaging() {
+        isRealTimeActive.set(false)
+        subscriptionJob?.cancel()
+        refreshJob?.cancel()
+        Log.d(TAG, "Real-time messaging stopped")
+    }
+
+    fun isRealTimeActive(): Boolean = isRealTimeActive.get()
 
     suspend fun sendMessage(receiverId: String, content: String): Boolean {
         return withContext(Dispatchers.IO) {
@@ -22,13 +133,11 @@ class GraphQLMessageService(private val context: Context) {
                     return@withContext false
                 }
 
-                val cryptoService = GraphQLCryptoService(context)
                 val encryptedData = cryptoService.sendEncryptedMessage(receiverId, content)
 
                 Log.d(TAG, "Sending ENCRYPTED message to: $receiverId")
-                Log.d(TAG, "Original content: $content")
+                Log.d(TAG, "Original content length: ${content.length}")
                 Log.d(TAG, "Encrypted content length: ${encryptedData.encryptedContent.length}")
-
 
                 val query = QueryBuilder.sendEncryptedMessage(
                     receiverId = receiverId,
@@ -86,8 +195,6 @@ class GraphQLMessageService(private val context: Context) {
                 val response: Response<GraphQLResponse<GetMessagesData>> = service.getMessages(request)
 
                 if (response.isSuccessful && response.body()?.errors.isNullOrEmpty()) {
-                    val cryptoService = GraphQLCryptoService(context)
-
                     response.body()?.data?.getMessages?.mapNotNull { messageResponse ->
                         try {
                             // Decrypt the message
@@ -100,17 +207,20 @@ class GraphQLMessageService(private val context: Context) {
                                 senderId = messageResponse.sender?.id ?: ""
                             )
 
-                            val decryptedContent = cryptoService.decryptMessage(encryptedData)
+                            val decryptedContent = cryptoService.decryptMessage(encryptedData, messageResponse.sender?.id ?: "")
 
+                            // Create the Message object with *decrypted* content for the UI
                             Message(
                                 id = messageResponse.id,
-                                content = decryptedContent, // Store decrypted content locally
-                                encryptedContent = messageResponse.encryptedContent,
+                                content = decryptedContent, // <-- Decrypted content for UI
+                                encryptedContent = messageResponse.encryptedContent, // <-- Original encrypted content
                                 senderId = messageResponse.sender?.id ?: "",
                                 receiverId = messageResponse.receiver?.id ?: "",
                                 timestamp = parseTimestamp(messageResponse.createdAt),
                                 isRead = messageResponse.isRead,
                                 iv = messageResponse.iv,
+                                authTag = messageResponse.authTag,
+                                version = messageResponse.version,
                                 dhPublicKey = messageResponse.dhPublicKey
                             )
                         } catch (e: Exception) {
@@ -133,7 +243,7 @@ class GraphQLMessageService(private val context: Context) {
     suspend fun fetchMessagesForContact(contactId: String): List<Message> {
         return withContext(Dispatchers.IO) {
             try {
-                val allMessages = fetchMessages()
+                val allMessages = fetchMessages() // This now returns messages with decrypted content
                 val contactMessages = allMessages.filter {
                     it.senderId == contactId || it.receiverId == contactId
                 }
@@ -149,14 +259,12 @@ class GraphQLMessageService(private val context: Context) {
 
     private fun parseTimestamp(timestampString: String): Long {
         return try {
-            // Simple timestamp parser - adjust based on your server's format
-            if (timestampString.isNotEmpty()) {
-                // If it's an ISO string, you might need a proper parser
-                System.currentTimeMillis()
-            } else {
-                System.currentTimeMillis()
-            }
+            // Use the same logic as GraphQLSubscriptionService
+            val formatter = java.time.format.DateTimeFormatter.ISO_DATE_TIME
+            val instant = java.time.Instant.from(formatter.parse(timestampString))
+            instant.toEpochMilli()
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse timestamp: $timestampString", e)
             System.currentTimeMillis()
         }
     }
