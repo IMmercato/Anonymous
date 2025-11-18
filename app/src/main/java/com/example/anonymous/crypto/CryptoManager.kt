@@ -20,6 +20,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object CryptoManager {
+    private const val TAG = "CryptoManager"
     private const val AES_KEY_SIZE_BYTES = 32
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val GCM_IV_LENGTH = 12
@@ -38,6 +39,12 @@ object CryptoManager {
         val kpg = KeyPairGenerator.getInstance("EC")
         val ecSpec = java.security.spec.ECGenParameterSpec("secp256r1") // Use named curve
         kpg.initialize(ecSpec, SecureRandom())
+        return kpg.generateKeyPair()
+    }
+
+    fun generateRSAKeyPair(): KeyPair {
+        val kpg = KeyPairGenerator.getInstance("RSA")
+        kpg.initialize(2048, SecureRandom())
         return kpg.generateKeyPair()
     }
 
@@ -125,9 +132,9 @@ object CryptoManager {
             .putString("${contactId}_private", privB64)
             .apply()
 
-        Log.d("CryptoManager", "Saved key pair for contact: $contactId")
-        Log.d("CryptoManager", "Public key format: ${keyPair.public.format}")
-        Log.d("CryptoManager", "Public key algorithm: ${keyPair.public.algorithm}")
+        Log.d(TAG, "Saved key pair for contact: $contactId")
+        Log.d(TAG, "Public key format: ${keyPair.public.format}")
+        Log.d(TAG, "Public key algorithm: ${keyPair.public.algorithm}")
     }
 
     fun getKeyPair(context: Context, contactId: String): KeyPair? {
@@ -136,7 +143,7 @@ object CryptoManager {
         val privStr = prefs.getString("${contactId}_private", null)
 
         if (pubStr == null || privStr == null) {
-            Log.d("CryptoManager", "No key pair found for contact: $contactId")
+            Log.d(TAG, "No key pair found for contact: $contactId")
             return null
         }
 
@@ -144,15 +151,48 @@ object CryptoManager {
             val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
             val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
 
-            val keyFactory = KeyFactory.getInstance("EC")
+            // Try EC
+            try {
+                val keyFactory = KeyFactory.getInstance("EC")
 
-            val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
-            val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
+                val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
+                val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
 
-            KeyPair(pubKey, privKey)
+                KeyPair(pubKey, privKey)
+            } catch (ecException: Exception) {
+                Log.d(TAG, "Failed to load as EC key, trying RSA: ${ecException.message}")
+                try {
+                    val keyFactory = KeyFactory.getInstance("RSA")
+                    val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
+                    val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
+
+                    KeyPair(pubKey, privKey)
+                } catch (rsaException: Exception) {
+                    Log.e(TAG, "Failed to load key as both EC and RSA for $contactId", rsaException)
+                    null
+                }
+            }
         } catch (e: Exception) {
-            Log.e("CryptoManager", "Error loading key pair for $contactId", e)
+            Log.e(TAG, "Error loading key pair for $contactId", e)
             null
         }
+    }
+
+    fun encryptWithRSA(data: ByteArray, publicKey: PublicKey): ByteArray {
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
+        return cipher.doFinal(data)
+    }
+
+    fun decryptWithRSA(encryptedData: ByteArray, privateKey: PrivateKey): ByteArray {
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.DECRYPT_MODE, privateKey)
+        return cipher.doFinal(encryptedData)
+    }
+
+    fun generateEphemeralAESKey(): SecretKey {
+        val keyBytes = ByteArray(32)
+        SecureRandom().nextBytes(keyBytes)
+        return SecretKeySpec(keyBytes, "AES")
     }
 }
