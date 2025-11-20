@@ -3,6 +3,7 @@ package com.example.anonymous
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
@@ -22,9 +23,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.crypto.CryptoManager
+import com.example.anonymous.network.GraphQLCryptoService
 import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.utils.JwtUtils
+import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.launch
 
 @Composable
@@ -150,13 +153,25 @@ fun NewContactDialog(
                                         val newContact = Contact(
                                             uuid = uuid,
                                             name = contactName,
-                                            publicKey = scannedPublicKey ?: ""  // Save the public key from QR code
+                                            publicKey = scannedPublicKey ?: ""
                                         )
                                         contactRepository.addContact(newContact)
 
-                                        // Generate key pair for this contact
-                                        val keyPair = CryptoManager.generateECDHKeyPair()
-                                        CryptoManager.saveKeyPair(context, uuid, keyPair)
+                                        // Generate key pair that matches the contact's algorithm
+                                        val myUserId = PrefsHelper.getUserUuid(context) ?: return@launch
+                                        if (CryptoManager.getKeyPair(context, myUserId) == null) {
+                                            val contactPublicKeyObj = GraphQLCryptoService(context).decodePublicKey(scannedPublicKey ?: "")
+                                            val myKeyPair = when (contactPublicKeyObj.algorithm) {
+                                                "EC" -> CryptoManager.generateECDHKeyPair()
+                                                "RSA" -> CryptoManager.generateRSAKeyPair()
+                                                else -> throw IllegalStateException("Unsupported key algorithm")
+                                            }
+                                            // Save the generated key pair under MY user ID
+                                            CryptoManager.saveKeyPair(context, myUserId, myKeyPair)
+                                            Log.d("NewContactAdding", "Generated and saved identity key pair for user: $myUserId")
+                                        } else {
+                                            Log.d("NewContactAdding", "Identity key pair already exists for user: $myUserId")
+                                        }
 
                                         onContactAdded(newContact)
                                         onDismiss()
@@ -166,7 +181,7 @@ fun NewContactDialog(
                                 }
                             }
                         },
-                        enabled = contactName.isNotBlank()
+                        enabled = contactName.isNotBlank() && scannedPublicKey?.isNotBlank() == true
                     ) {
                         Text("Add")
                     }
