@@ -43,7 +43,7 @@ class GraphQLCryptoService(private val context: Context) {
 
     private suspend fun encryptWithECDH(receiverId: String, receiverPublicKey: PublicKey, content: String): EncryptedMessageData {
 
-        val myKeyPair = CryptoManager.getKeyPair(context, myUserId)
+        val myKeyPair = CryptoManager.getUserKeyPair(context)
             ?: throw IllegalStateException("No ECDH key pair found for user: $myUserId")
 
         // Perform ECDH key agreement to get shared secret
@@ -89,52 +89,61 @@ class GraphQLCryptoService(private val context: Context) {
     suspend fun decryptMessage(encryptedMessage: EncryptedMessageData, senderId: String, receiverId: String): String {
         return try {
             if (receiverId != myUserId) {
-                Log.w(TAG, "RSA: Message from $senderId was not sent to me ($myUserId), skipping decryption.")
+                Log.w(TAG, "Message from $senderId was not sent to me ($myUserId), skipping decryption.")
                 throw IllegalStateException("Message not intended for current user")
             }
 
-            val myKeyPair = CryptoManager.getKeyPair(context, myUserId)
-                ?: throw IllegalStateException("No key pair found for sender: $myUserId")
+            val senderContact = getContact(senderId)
+            if (senderContact == null || senderContact.publicKey.isBlank()) {
+                Log.e(TAG, "No public key found for sender: $senderId. Cannot determine encryption method.")
+                throw IllegalStateException("No public key found for sender: $senderId")
+            }
 
-            // --- RSA Decryption Path ---
-            if (myKeyPair.private.algorithm == "RSA") {
-                Log.d(TAG, "Attempting RSA decryption for message from $senderId")
+            val senderPublicKey = decodePublicKey(senderContact.publicKey)
 
-                val encryptedAesKeyBytes = Base64.decode(encryptedMessage.dhPublicKey, Base64.NO_WRAP)
-                val aesKeyBytes = CryptoManager.decryptWithRSA(encryptedAesKeyBytes, myKeyPair.private)
-                val aesKey = SecretKeySpec(aesKeyBytes, "AES")
+            when (senderPublicKey.algorithm) {
+                "RSA" -> {
+                    Log.d(TAG, "Attempting RSA decryption for message from $senderId (sender has RSA key)")
+                    val encryptedAesKeyBytes = Base64.decode(encryptedMessage.dhPublicKey, Base64.NO_WRAP)
+                    val myKeyPair = CryptoManager.getUserKeyPair(context)
+                        ?: throw IllegalStateException("No RSA key pair found for receiver: $myUserId")
+                    val aesKeyBytes = CryptoManager.decryptWithRSA(encryptedAesKeyBytes, myKeyPair.private)
+                    val aesKey = SecretKeySpec(aesKeyBytes, "AES")
+                    val encryptedData = CryptoManager.EncryptedMessage(
+                        v = encryptedMessage.version,
+                        iv = encryptedMessage.iv,
+                        ct = encryptedMessage.encryptedContent,
+                        authTag = encryptedMessage.authTag
+                    )
+                    val decryptedContent = CryptoManager.decryptMessage(encryptedData, aesKey)
+                    Log.d(TAG, "RSA decryption successful for message from $senderId")
+                    decryptedContent
+                }
 
-                val encryptedData = CryptoManager.EncryptedMessage(
-                    v = encryptedMessage.version,
-                    iv = encryptedMessage.iv,
-                    ct = encryptedMessage.encryptedContent,
-                    authTag = encryptedMessage.authTag
-                )
+                "EC" -> {
+                    Log.d(TAG, "Attempting ECDH decryption for message from $senderId (sender has EC key)")
+                    val senderEphemeralPublicKey = decodePublicKey(encryptedMessage.dhPublicKey)
+                    val myKeyPair = CryptoManager.getUserKeyPair(context)
+                        ?: throw IllegalStateException("No EC key pair found for receiver: $myUserId")
+                    val sharedSecret = CryptoManager.performECDH(myKeyPair.private, senderEphemeralPublicKey)
+                    val salt = "anonymous-salt".toByteArray()
+                    val info = "anonymous-aes-key".toByteArray()
+                    val aesKey = CryptoManager.deriveAESKey(sharedSecret, salt, info)
+                    val encryptedData = CryptoManager.EncryptedMessage(
+                        v = encryptedMessage.version,
+                        iv = encryptedMessage.iv,
+                        ct = encryptedMessage.encryptedContent,
+                        authTag = encryptedMessage.authTag
+                    )
+                    val decryptedContent = CryptoManager.decryptMessage(encryptedData, aesKey)
+                    Log.d(TAG, "ECDH decryption successful for message from $senderId")
+                    decryptedContent
+                }
 
-                val decryptedContent = CryptoManager.decryptMessage(encryptedData, aesKey)
-                Log.d(TAG, "RSA decryption successful fro message from $senderId")
-                return decryptedContent
-            } else {    // ECDH
-                Log.d(TAG, "Attempting ECDH decryption fro message from $senderId")
-                // Decode sender's public key from the message
-                val senderEphemeralPublicKey = decodePublicKey(encryptedMessage.dhPublicKey)
-
-                // Perform ECDH key agreement to get shared secret
-                val sharedSecret = CryptoManager.performECDH(myKeyPair.private, senderEphemeralPublicKey)
-
-                // Derive AES key using HKDF (same parameters as encryption)
-                val salt = "anonymous-salt".toByteArray()
-                val info = "anonymous-aes-key".toByteArray()
-                val aesKey = CryptoManager.deriveAESKey(sharedSecret, salt, info)
-
-                val encryptedData = CryptoManager.EncryptedMessage(
-                    v = encryptedMessage.version,
-                    iv = encryptedMessage.iv,
-                    ct = encryptedMessage.encryptedContent,
-                    authTag = encryptedMessage.authTag
-                )
-
-                CryptoManager.decryptMessage(encryptedData, aesKey)
+                else -> {
+                    Log.e(TAG, "Unsupported key algorithm for sender ${senderPublicKey.algorithm}")
+                    throw IllegalStateException("Unsupported key algorithm: ${senderPublicKey.algorithm}")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Decryption failed for sender ${encryptedMessage.senderId}", e)

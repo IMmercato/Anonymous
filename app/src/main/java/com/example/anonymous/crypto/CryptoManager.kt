@@ -7,6 +7,7 @@ import com.example.anonymous.utils.PrefsHelper
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
@@ -137,44 +138,102 @@ object CryptoManager {
         Log.d(TAG, "Public key algorithm: ${keyPair.public.algorithm}")
     }
 
-    fun getKeyPair(context: Context, contactId: String): KeyPair? {
+    fun getUserKeyPair(context: Context): KeyPair? {
+        val alias = PrefsHelper.getKeyAlias(context) ?: run {
+            Log.e(TAG, "No key alias found for the current user")
+            return null
+        }
+        Log.d(TAG, "Attempting to load user's own key pair from Keystore using alias: $alias")
+
+        return try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            val privateKeyEntry = keyStore.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
+            if (privateKeyEntry != null) {
+                val publicKey = privateKeyEntry.certificate.publicKey
+                val privateKey = privateKeyEntry.privateKey
+                Log.d(TAG, "Successfully loaded user's own key pair from Keystore.")
+                KeyPair(publicKey, privateKey)
+            } else {
+                Log.e(TAG, "No private key entry found in Keystore for alias: $alias")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load user's own key pair from Keystore", e)
+            null
+        }
+    }
+
+    fun getContactPublicKey(context: Context, contactId: String): PublicKey? {
+        val prefs = PrefsHelper.getSecurePrefs(context)
+        val pubStr = prefs.getString("${contactId}_public", null)
+
+        Log.d(TAG, "Attempting to load public key for contact: $contactId from EncryptedSharedPreferences")
+        Log.d(TAG, "Found public key in prefs: ${pubStr != null}")
+
+        if (pubStr == null) {
+            Log.d(TAG, "No public key found for contact: $contactId")
+            return null
+        }
+
+        try {
+            val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
+            val keyFactory = KeyFactory.getInstance("RSA")
+            val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
+            Log.d(TAG, "Successfully loaded public key for contact: $contactId")
+            return pubKey
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load public key from prefs fro $contactId", e)
+            return null
+        }
+    }
+
+    fun getContactKeyPair(context: Context, contactId: String): KeyPair? {
         val prefs = PrefsHelper.getSecurePrefs(context)
         val pubStr = prefs.getString("${contactId}_public", null)
         val privStr = prefs.getString("${contactId}_private", null)
 
-        if (pubStr == null || privStr == null) {
-            Log.d(TAG, "No key pair found for contact: $contactId")
+        Log.d(TAG, "Attempting to load key pair for contact: $contactId from EncryptedSharedPreferences")
+        Log.d(TAG, "Found public key in prefs: ${pubStr != null}")
+        Log.d(TAG, "Found private key in prefs: ${privStr != null}")
+
+        if (pubStr == null) {
+            Log.d(TAG, "No public key found for contact: $contactId")
             return null
         }
 
-        return try {
-            val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
-            val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
-
-            // Try EC
+        if (privStr != null) {
+            Log.d(TAG, "Found private key for contact: $contactId (This cant be true.)")
             try {
-                val keyFactory = KeyFactory.getInstance("EC")
-
+                val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
+                val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
+                val keyFactory = KeyFactory.getInstance("RSA")
                 val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
                 val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
-
-                KeyPair(pubKey, privKey)
-            } catch (ecException: Exception) {
-                Log.d(TAG, "Failed to load as EC key, trying RSA: ${ecException.message}")
-                try {
-                    val keyFactory = KeyFactory.getInstance("RSA")
-                    val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
-                    val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
-
-                    KeyPair(pubKey, privKey)
-                } catch (rsaException: Exception) {
-                    Log.e(TAG, "Failed to load key as both EC and RSA for $contactId", rsaException)
-                    null
-                }
+                return KeyPair(pubKey, privKey)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load key pair (pub+priv) from prefs for $contactId, this isn't an error. (the priv key of the contact is never shared)", e)
+                return null
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error loading key pair for $contactId", e)
-            null
+        } else {
+            Log.d(TAG, "Found only public key for contact: $contactId in prefs.")
+            try {
+                val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
+                val keyFactory = KeyFactory.getInstance("RSA")
+                val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
+                Log.w(TAG, "Only public key found for contact $contactId in prefs. This is correct.")
+                return null
+            } catch (e: Exception) {
+                return null
+            }
+        }
+    }
+
+    fun getKeyPair(context: Context, contactId: String, isOwnKey: Boolean = false): KeyPair? {
+        Log.d(TAG, "getKeyPair called for contactId: $contactId, isOwnKey: $isOwnKey")
+        return if (isOwnKey) {
+            getUserKeyPair(context)
+        } else {
+            getContactKeyPair(context, contactId)
         }
     }
 
