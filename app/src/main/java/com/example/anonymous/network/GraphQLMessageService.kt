@@ -69,7 +69,7 @@ class GraphQLMessageService(private val context: Context) {
                                 senderId = senderId
                             )
 
-                            val decryptedContent = cryptoService.decryptMessage(encryptedData, senderId)
+                            val decryptedContent = cryptoService.decryptMessage(encryptedData, senderId, receiverId)
 
                             val decryptedMessage = Message(
                                 id = messageResponse.id,
@@ -207,7 +207,7 @@ class GraphQLMessageService(private val context: Context) {
                                 senderId = messageResponse.sender?.id ?: ""
                             )
 
-                            val decryptedContent = cryptoService.decryptMessage(encryptedData, messageResponse.sender?.id ?: "")
+                            val decryptedContent = cryptoService.decryptMessage(encryptedData, messageResponse.sender?.id ?: "", messageResponse.receiver?.id ?: "")
 
                             // Create the Message object with *decrypted* content for the UI
                             Message(
@@ -259,13 +259,17 @@ class GraphQLMessageService(private val context: Context) {
 
     private fun parseTimestamp(timestampString: String): Long {
         return try {
-            // Use the same logic as GraphQLSubscriptionService
-            val formatter = java.time.format.DateTimeFormatter.ISO_DATE_TIME
-            val instant = java.time.Instant.from(formatter.parse(timestampString))
-            instant.toEpochMilli()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse timestamp: $timestampString", e)
-            System.currentTimeMillis()
+            timestampString.toLong()
+        } catch (e: NumberFormatException) {
+            Log.w(TAG, "Failed to parse timestamp as long: $timestampString, trying ISO format")
+            try {
+                val formatter = java.time.format.DateTimeFormatter.ISO_DATE_TIME
+                val instant = java.time.Instant.from(formatter.parse(timestampString))
+                instant.toEpochMilli()
+            } catch (isoE: Exception) {
+                Log.e(TAG, "Failed to parse timestamp: $timestampString", isoE)
+                System.currentTimeMillis()
+            }
         }
     }
 
