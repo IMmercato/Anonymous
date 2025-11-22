@@ -11,7 +11,11 @@ export class JwtAuthGuard implements CanActivate {
     // Detect if this is an HTTP request or GraphQL execution
     if (context.getType<'graphql'>() === 'graphql') {
       const gqlCtx = GqlExecutionContext.create(context);
-      request = gqlCtx.getContext().req;
+      const ctx = gqlCtx.getContext();
+      request = ctx.req || ctx.connection?.context?.req;
+      if (!request) {
+        throw new UnauthorizedException('Cannot extraxt request from context')
+      }
     } else {
       request = context.switchToHttp().getRequest();
     }
