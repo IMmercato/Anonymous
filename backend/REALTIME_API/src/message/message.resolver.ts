@@ -32,6 +32,10 @@ export class MessageResolver {
       parseInt(version, 10),
       dhPublicKey
     );
+    
+    await this.pubSub.publish('newMessage', {
+      newMessage: message,
+    });
     await this.pubSub.publish(`newMessage:${receiverId}`, {
       newMessage: message,
     });
@@ -93,6 +97,6 @@ export class MessageResolver {
   })
   newMessage(@Context() context: any) {
     const userId = context.req.user.uuid;
-    return this.pubSub.asyncIterableIterator('newMessage');
+    return this.pubSub.asyncIterableIterator(['newMessage', `newMessage:${userId}`]);
   }
 }

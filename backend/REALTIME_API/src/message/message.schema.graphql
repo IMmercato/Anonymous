@@ -1,6 +1,10 @@
 type Message {
   id: ID!
   encryptedContent: String!
+  iv: String!
+  authTag: String!
+  version: Int!
+  dhPublicKey: String
   sender: User!
   receiver: User!
   isRead: Boolean!
@@ -17,6 +21,10 @@ extend type Mutation {
   sendMessage(
     receiverId: ID!
     encryptedContent: String!
+    iv: String!
+    authTag: String!
+    version: Int!
+    dhPublicKey: String
   ): Message!
   markMessageAsRead(messageId: ID!): Message!
 }
