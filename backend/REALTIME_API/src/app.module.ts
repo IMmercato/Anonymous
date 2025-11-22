@@ -18,11 +18,20 @@ import { ApolloServerPluginLandingPageLocalDefault } from '@apollo/server/plugin
         resolvers: { DateTime: DateTimeResolver },
         context: ({ req, res }: { req: Request; res: Response }) => ({ req, res }),
         plugins: [],
-        installSubscriptionHandlers: true,
         subscriptions: {
-          'graphql-ws': true,
-          'subscriptions-transport-ws': true
-        }
+          'graphql-ws': {
+            path: '/graphql',
+            onConnect: (context: any) => {
+              const { connectionParams, extra} = context;
+              console.log('WebSocket connected');
+              return true;
+            },
+            onDisconnect: (context: any) => {
+              console.log('WebSocket disconnected');
+            },
+          },
+        },
+        installSubscriptionHandlers: true,
     }),
     AuthModule,
     UserModule,

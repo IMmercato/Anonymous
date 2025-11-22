@@ -42,29 +42,37 @@ class GraphQLSubscriptionService(private val context: Context) {
             val request = Request.Builder()
                 .url("wss://immercato.hackclub.app/graphql")
                 .header("Authorization", "Bearer $sessionToken")
+                .header("Sec-WebSocket-Protocol", "graphql-ws")
                 .build()
 
             webSocket = client.newWebSocket(request, object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     Log.d(TAG, "WebSocket connection opened")
-                    val initMessage = GraphQLSubscriptionMessage(
-                        type = "connection_init",
-                        payload = mapOf("Authorized" to "Bearer $sessionToken")
-                    )
-                    webSocket.send(gson.toJson(initMessage))
+                    Log.d(TAG, "Response headers: ${response.headers}")
+                    val initMessage = """
+                        {
+                            "type": "connection_init",
+                            "payload": {}
+                        }
+                    """.trimIndent()
+                    webSocket.send(initMessage)
+                    Log.d(TAG, "Sent connection_init")
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
                     Log.d(TAG, "WebSocket message received: $text")
                     try {
-                        val meesage = gson.fromJson(text, GraphQLSubscriptionMessage::class.java)
-                        when (meesage.type) {
+                        val message = gson.fromJson(text, GraphQLSubscriptionMessage::class.java)
+                        when (message.type) {
                             "connection_ack" -> {
                                 Log.d(TAG, "WebSocket connection acknowledged")
-                                startNewMessageSubscription()
+                                startNewMessageSubscription(webSocket)
                             }
                             "data" -> {
                                 Log.d(TAG, "Subscription data received")
+                            }
+                            else -> {
+                                Log.d(TAG, "Received message type: ${message.type}")
                             }
                         }
                     } catch (e: Exception) {
@@ -81,7 +89,11 @@ class GraphQLSubscriptionService(private val context: Context) {
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Log.e(TAG, "WebSocket connection failed", t)
+                    Log.e(TAG, "WebSocket connection failed: ${t.message}")
+                    response?.let {
+                        Log.e(TAG, "Response code: ${it.code}, message: ${it.message}")
+                        Log.e(TAG, "Response headers: ${it.headers}")
+                    }
                 }
             })
 
@@ -92,18 +104,18 @@ class GraphQLSubscriptionService(private val context: Context) {
         }
     }
 
-    private fun startNewMessageSubscription() {
+    private fun startNewMessageSubscription(webSocket: WebSocket) {
         val subscriptionQuery = """
             {
                 "id": "1",
-                "type": "start",
+                "type": "subscribe",
                 "payload": {
                     "query": "subscription NewMessage { newMessage { id encryptedContent iv authTag version dhPublicKey sender { id } receiver { id } isRead createdAt } }"
                 }
             }
         """.trimIndent()
 
-        webSocket?.send(subscriptionQuery)
+        webSocket.send(subscriptionQuery)
         Log.d(TAG, "New message subscription started")
     }
 
@@ -114,13 +126,31 @@ class GraphQLSubscriptionService(private val context: Context) {
                     Log.d(TAG, "Raw WebSocket message: $text")
 
                     val message = gson.fromJson(text, GraphQLSubscriptionMessage::class.java)
-                    if (message.type == "data" && message.payload != null) {
-                        val subscriptionData = gson.fromJson(
-                            gson.toJson(message.payload["data"]),
-                            SubscriptionData::class.java
-                        )
-                        Log.d(TAG, "Emitting subscription data: ${subscriptionData.newMessage?.id}")
-                        trySend(subscriptionData)
+                    when (message.type) {
+                        "next" -> {
+                            message.payload?.let {payload ->
+                                val dataElement = payload["data"]
+                                if (dataElement != null) {
+                                    val subscriptionData = gson.fromJson(
+                                        gson.toJsonTree(dataElement),
+                                        SubscriptionData::class.java
+                                    )
+                                    Log.d(TAG, "Emitting subscription data: ${subscriptionData.newMessage?.id}")
+                                    trySend(subscriptionData)
+                                } else {
+                                    Log.wtf(TAG, "No data field in payload")
+                                }
+                            }
+                        }
+                        "complete" -> {
+                            Log.d(TAG, "Subscription completed")
+                        }
+                        "error" -> {
+                            Log.e(TAG, "Subscription error: ${message.payload}")
+                        }
+                        else -> {
+                            Log.d(TAG, "Received message type: ${message.type}")
+                        }
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing subscription message", e)
@@ -143,6 +173,7 @@ class GraphQLSubscriptionService(private val context: Context) {
         val request = Request.Builder()
             .url("wss://immercato.hackclub.app/graphql")
             .header("Authorization", "Bearer $sessionToken")
+            .header("Sec-WebSocket-Protocol","graphql-ws")
             .build()
 
         val webSocket = client.newWebSocket(request, listener)
