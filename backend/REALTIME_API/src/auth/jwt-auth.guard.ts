@@ -1,41 +1,36 @@
 import { Injectable, CanActivate, ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { GqlExecutionContext } from '@nestjs/graphql';
 import { verifyJwt } from './jwt.util';
-import { Request } from 'express';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    let request: Request;
+    const gqlCtx = GqlExecutionContext.create(context);
+    const ctx = gqlCtx.getContext();
 
-    // Detect if this is an HTTP request or GraphQL execution
-    if (context.getType<'graphql'>() === 'graphql') {
-      const gqlCtx = GqlExecutionContext.create(context);
-      const ctx = gqlCtx.getContext();
-      request = ctx.req || ctx.connection?.context?.req;
-      if (!request) {
-        throw new UnauthorizedException('Cannot extraxt request from context')
-      }
-    } else {
-      request = context.switchToHttp().getRequest();
-    }
-
-    if (!request) {
-      throw new UnauthorizedException('Cannot extract request from context');
-    }
-
-    const authHeader = request.headers?.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      throw new UnauthorizedException('Authorization header missing or malformed');
-    }
-
-    const token = authHeader.slice(7);
-    try {
-      const payload = verifyJwt(token);
-      (request as any).user = payload; // attach decoded token payload for downstream use
+    // WebSocket Subscription
+    if (ctx.user) {
       return true;
-    } catch {
-      throw new UnauthorizedException('Invalid or expired JWT token');
     }
+
+    // HTTP Request (Query/Mutation)
+    if (ctx.req) {
+      const request = ctx.req;
+      const authHeader = request.headers?.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        throw new UnauthorizedException('Authorization header missing or malformed');
+      }
+
+      const token = authHeader.slice(7);
+      try {
+        const payload = verifyJwt(token);
+        (request as any).user = payload;
+        return true;
+      } catch {
+        throw new UnauthorizedException('Invalid or expired JWT token')
+      }
+    }
+
+    throw new UnauthorizedException('No user context found for WebSoket or HTTp request.');
   }
 }

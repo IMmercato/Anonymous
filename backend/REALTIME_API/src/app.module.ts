@@ -5,43 +5,64 @@ import { DateTimeResolver } from 'graphql-scalars';
 import { AuthModule } from './auth/auth.module';
 import { UserModule } from './user/user.module';
 import { MessageModule } from './message/message.module';
+import { verifyJwt } from './auth/jwt.util';
+import { UnauthorizedException } from '@nestjs/common';
 
 @Module({
     imports: [
     GraphQLModule.forRoot<ApolloDriverConfig>({
         driver: ApolloDriver,
         typePaths: ['./**/*.graphql'],
-        debug: 
-        false,
+        debug: false,
         formatError: (error) => ({ message: error.message }),
         path: '/graphql',
         resolvers: { DateTime: DateTimeResolver },
-        context: ({ req, res, connection }: any): { req?: any; res?: any; connection?: any } => {
-          if (connection) {
-            return { req: connection.context };
-          }
-          return { req, res };
-        },
+        context: ({ req, res }: { req: Request; res: Response }) => ({ req, res }),
         subscriptions: {
           'graphql-ws': {
             path: '/graphql',
             onConnect: (context: any) => {
               const { connectionParams, extra } = context;
               const token = connectionParams?.Authorization || 
-                           connectionParams?.authorization ||
-                           extra?.request?.headers?.authorization;
-              console.log('WebSocket connection attempt with token:', token ? 'present' : 'missing');
-              return {
-                req: {
-                  headers: {
-                    authorization: token
-                  },
-                  user: null
-                }
-              };
+                           connectionParams?.authorization;             
+              
+              if (!token) {
+                console.log('Websocket connection failde: No token provided');
+                throw new UnauthorizedException('Authorization token missing');
+              }
+
+              const authToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+
+              try {
+                const userPayload = verifyJwt(authToken);
+                console.log('WS (graphql-ws) connection successful for user:', (userPayload as any)?.uuid);
+                return { user: userPayload };
+              } catch(err) {
+                throw new UnauthorizedException('Invalid or expired token');
+              }
             },
             onDisconnect: () => {
-              console.log('WebSocket disconnected');
+              console.log('WS (graphql-ws) disconnected');
+            },
+          },
+          'subscriptions-transport-ws': {
+            path: '/graphql',
+            onConnect: (connectionParams: any) => {
+              const token = connectionParams?.Authorization || 
+                           connectionParams?.authorization;
+              if (!token) {
+                throw new UnauthorizedException('Authorization token missing');
+              }
+              const authToken = token.startsWith('Bearer ') ? token.slice(7) : token;
+              try {
+                const userPayload = verifyJwt(authToken);
+                console.log('WS (subscriptions-transport-ws) connection successful for user:', (userPayload as any)?.uuid);
+              } catch (err) {
+                throw new UnauthorizedException('Invalid or expired token')
+              }
+            },
+            onDisconnect: () => {
+              console.log('WS (subscriptions-transport-ws) disconnected')
             },
           },
         },
