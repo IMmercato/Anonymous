@@ -62,13 +62,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.graphics.drawable.IconCompat
 import com.example.anonymous.datastore.ChatCustomizationSettings
+import com.example.anonymous.network.ConnectionStatus
 import com.example.anonymous.network.GraphQLMessageService
 import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.MessageRepository
 import com.example.anonymous.utils.PrefsHelper
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -96,8 +95,10 @@ fun ChatScreen(
     var message by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
-    var connectionStatus by remember { mutableStateOf("Connecting...") }
     val coroutineScope = rememberCoroutineScope()
+    var connectionStatus by remember {
+        mutableStateOf<ConnectionStatus>(ConnectionStatus.Connecting)
+    }
 
     val iconList = listOf(
         IconType.Vector(Icons.Default.Favorite, { text -> "❤️ $text ❤️" }),
@@ -111,6 +112,12 @@ fun ChatScreen(
             }
         })
     )
+
+    LaunchedEffect(messageService) {
+        messageService.connectionStatus.collect {
+            connectionStatus = it
+        }
+    }
 
     // Load messages on start
     LaunchedEffect(contactId) {
@@ -141,28 +148,11 @@ fun ChatScreen(
     LaunchedEffect(messageService) {
         messageService.newMessages.collect { newDecryptedMessageFromServer ->
             try {
-                // Add the *encrypted* version of the incoming message to the local repository
-                // The newDecryptedMessageFromServer contains decrypted content for UI, but the repo stores the encrypted parts.
-                // We need to reconstruct the encrypted version to save it.
-                // This assumes the service emits a message with both encrypted and decrypted content.
-                // If not, the service needs to emit the raw encrypted data along with the decrypted content.
-                // For now, let's assume the service emits the correct format for saving.
-                // The service already constructs the message with encryptedContent, iv, etc.
                 messageRepository.addMessage(newDecryptedMessageFromServer)
-
-                // Reload and decrypt from repo for UI state (or manage state diff more efficiently)
                 val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
                 messages = updatedMessagesDecrypted
-
-                // Update connection status
-                connectionStatus = if (messageService.isRealTimeActive()) {
-                    "Connected (Real-time)"
-                } else {
-                    "Connected (Polling)"
-                }
             } catch (e: Exception) {
                 Log.e("ChatScreen", "Error processing new message or updating UI", e)
-                connectionStatus = "Disconnected - Retrying..."
             }
         }
     }
@@ -180,11 +170,12 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text("Chat with $contactName")
-                        Text(
-                            connectionStatus,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        when(connectionStatus) {
+                            is ConnectionStatus.Connecting -> Text("Connecting...", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                            is ConnectionStatus.Connected -> Text("Connected", style = MaterialTheme.typography.bodySmall, color = Color.Green)
+                            is ConnectionStatus.Polling -> Text("Polling for updates...", style = MaterialTheme.typography.bodySmall, color = Color.Yellow)
+                            is ConnectionStatus.Disconnected -> Text("Offline", style = MaterialTheme.typography.bodySmall, color = Color.Red)
+                        }
                     }
                 },
                 navigationIcon = {
@@ -313,7 +304,7 @@ fun ChatScreen(
                                             // 2. Create the *encrypted* Message object for local storage
                                             val encryptedMessageForStorage = Message(
                                                 id = System.currentTimeMillis().toString(), // Server should provide ID, but using local as placeholder
-                                                content = "", // Leave content empty for storage, will decrypt when loaded
+                                                content = message,
                                                 encryptedContent = encryptedData.encryptedContent,
                                                 senderId = currentUserId,
                                                 receiverId = contactId,

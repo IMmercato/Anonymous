@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.anonymous.network.model.*
 import com.example.anonymous.utils.PrefsHelper
+import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -16,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.Response
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class GraphQLMessageService(private val context: Context) {
     private val TAG = "GraphQLMessageService"
@@ -27,27 +29,26 @@ class GraphQLMessageService(private val context: Context) {
     private var refreshJob: Job? = null
     private var subscriptionJob: Job? = null
 
+    private var lastPollTimeStamp = AtomicLong(0L)
+
     private val _newMessages = MutableSharedFlow<Message>()
     val newMessages: SharedFlow<Message> = _newMessages.asSharedFlow()
 
+    private val _connectionStatus = MutableSharedFlow<ConnectionStatus>(replay = 1)
+    val connectionStatus: SharedFlow<ConnectionStatus> = _connectionStatus.asSharedFlow()
+
     suspend fun initializeRealTimeMessaging(contactId: String) {
         Log.d(TAG, "Initializing real-time messaging...")
-
-        val webSocketSuccess = subscriptionService.initializeWebSocket()
-
-        if (webSocketSuccess) {
-            startSubscription(contactId)
-            isRealTimeActive.set(true)
-            Log.d(TAG, "Real-time messaging activated via WebSocket")
-        } else {
-            startPollingFallback(contactId)
-            Log.d(TAG, "WebSocket failed, falling back to polling")
-        }
+        startSubscription(contactId)
+        isRealTimeActive.set(true)
+        Log.d(TAG, "Real-time messaging activated via WebSocket")
     }
 
     private fun startSubscription(contactId: String) {
         subscriptionJob = CoroutineScope(Dispatchers.IO).launch {
             try {
+                _connectionStatus.emit(ConnectionStatus.Connected)
+                Log.d(TAG, "Subscription flow started, emitting Connected status.")
                 subscriptionService.subscribeToNewMessages().collect { subscriptionData ->
                     val messageResponse = subscriptionData.newMessage ?: run {
                         Log.w(TAG, "Received subscription data but 'newMessage' field was null.")
@@ -55,8 +56,14 @@ class GraphQLMessageService(private val context: Context) {
                     }
 
                     // Verify this message is relevant to our current contact
-                    val senderId = messageResponse.sender!!.id
-                    val receiverId = messageResponse.receiver!!.id
+                    val senderId = messageResponse.sender?.id ?: run {
+                        Log.w(TAG, "Subscription message ${messageResponse.id} has null sender. Skipping.")
+                        return@collect
+                    }
+                    val receiverId = messageResponse.receiver?.id ?: run {
+                        Log.w(TAG, "Subscription message ${messageResponse.id} has null receiver. Skipping.")
+                        return@collect
+                    }
 
                     if (senderId == contactId || receiverId == contactId) {
                         try {
@@ -95,6 +102,7 @@ class GraphQLMessageService(private val context: Context) {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Subscription flow error", e)
+                _connectionStatus.emit(ConnectionStatus.Disconnected(e.message ?: "Unknown error"))
                 // Fall back to polling if subscription fails
                 startPollingFallback(contactId)
             }
@@ -102,10 +110,27 @@ class GraphQLMessageService(private val context: Context) {
     }
 
     private fun startPollingFallback(contactId: String) {
+        _connectionStatus.tryEmit(ConnectionStatus.Polling)
+        Log.w(TAG, "WebSocket failed, starting polling fallback for contact $contactId")
         refreshJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
                 try {
                     val messages = fetchMessagesForContact(contactId)
+                    if (messages.isNotEmpty()) {
+                        val newestTimestamp = messages.maxOfOrNull { it.timestamp } ?:0L
+
+                        if (lastPollTimeStamp.get() == 0L) {
+                            lastPollTimeStamp.set(newestTimestamp)
+                        } else {
+                            val newMessage = messages.filter { it.timestamp > lastPollTimeStamp.get() }
+
+                            if (newMessage.isNotEmpty()) {
+                                Log.d(TAG, "Polling found ${newMessage.size} new messages.")
+                                newMessage.forEach { _newMessages.emit(it) }
+                                lastPollTimeStamp.set(newestTimestamp)
+                            }
+                        }
+                    }
                     delay(5000)
                 } catch (e: Exception) {
                     Log.e(TAG, "Polling error", e)
@@ -119,6 +144,7 @@ class GraphQLMessageService(private val context: Context) {
         isRealTimeActive.set(false)
         subscriptionJob?.cancel()
         refreshJob?.cancel()
+        _connectionStatus.tryEmit(ConnectionStatus.Disconnected("Chat closed"))
         Log.d(TAG, "Real-time messaging stopped")
     }
 
@@ -292,4 +318,11 @@ class GraphQLMessageService(private val context: Context) {
             Log.e(TAG, "Error reading error body", e)
         }
     }
+}
+
+sealed class ConnectionStatus {
+    object Connecting : ConnectionStatus()
+    object Connected : ConnectionStatus()
+    object Polling : ConnectionStatus()
+    data class Disconnected(val reason: String) : ConnectionStatus()
 }
