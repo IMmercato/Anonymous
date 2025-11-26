@@ -1,11 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { PubSubService } from './pubsub.service';
 import { Message, Prisma } from '@prisma/client';
 
 @Injectable()
 export class MessageService {
-  constructor(private prisma: PrismaService, private pubSub: PubSubService) {
+  constructor(private prisma: PrismaService) {
     console.log('MessageService initialized, prisma:', !!prisma);
   }
 
@@ -29,10 +28,6 @@ export class MessageService {
         receiverId,
       },
       include: { sender: true, receiver: true },
-    });
-
-    await this.pubSub.publish('newMessage', {
-      newMessage: message,
     });
     return message;
   }

@@ -1,8 +1,20 @@
 import { Resolver, Query, Mutation, Args, Context, Subscription, ResolveField, Parent } from '@nestjs/graphql';
-import { UseGuards } from '@nestjs/common';
+import { UseGuards, UnauthorizedException } from '@nestjs/common';
 import { MessageService } from './message.service';
 import { PubSubService } from './pubsub.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+
+const getUserIdFromContext = (context: any): string => {
+  if (context.user?.uuid) {
+    return context.user.uuid;
+  }
+
+  if (context.req?.user?.uuid) {
+    return context.req.user.uuid;
+  }
+
+  throw new UnauthorizedException('User ID not found in context');
+};
 
 @Resolver('Message')
 export class MessageResolver {
@@ -22,7 +34,7 @@ export class MessageResolver {
     @Context() context: any,
     @Args('dhPublicKey', { nullable: true }) dhPublicKey?: string
   ) {
-    const senderId = context.req.user.uuid;
+    const senderId = getUserIdFromContext(context);
     const message = await this.messageService.sendEncryptedMessage(
       senderId,
       receiverId,
@@ -49,7 +61,7 @@ export class MessageResolver {
     @Args('receiverId') receiverId: string,
     @Context() context: any
   ) {
-    const userId = context.req.user.uuid;
+    const userId = getUserIdFromContext(context);
     if (receiverId !== userId) {
       throw new Error('You can only view your own messages');
     }
@@ -59,7 +71,7 @@ export class MessageResolver {
   @UseGuards(JwtAuthGuard)
   @Query('getUnreadMessages')
   async getUnreadMessages(@Context() context: any) {
-    const userId = context.req.user.uuid;
+    const userId = getUserIdFromContext(context);
     return this.messageService.getUnreadMessages(userId);
   }
 
@@ -69,7 +81,7 @@ export class MessageResolver {
     @Args('messageId') messageId: string,
     @Context() context: any
   ) {
-    const userId = context.req.user.uuid;
+    const userId = getUserIdFromContext(context);
     const message = await this.messageService.getMessageById(messageId);
 
     if (!message) {
@@ -84,10 +96,9 @@ export class MessageResolver {
   }
 
   // Real-time subscription
-  @UseGuards(JwtAuthGuard)
   @Subscription('newMessage', {
     filter: (payload, variables, context) => {
-      const userId = context.req.user.uuid;
+      const userId = getUserIdFromContext(context);
       const isForCurrentUser = payload.newMessage.receiverId === userId;
       return isForCurrentUser;
     },
@@ -96,7 +107,7 @@ export class MessageResolver {
     }
   })
   newMessage(@Context() context: any) {
-    const userId = context.req.user.uuid;
+    const userId = getUserIdFromContext(context);
     return this.pubSub.asyncIterableIterator(['newMessage', `newMessage:${userId}`]);
   }
 }
