@@ -96,6 +96,7 @@ export class MessageResolver {
   }
 
   // Real-time subscription
+  @UseGuards(JwtAuthGuard)
   @Subscription('newMessage', {
     filter: (payload, variables, context) => {
       const userId = getUserIdFromContext(context);
@@ -108,6 +109,6 @@ export class MessageResolver {
   })
   newMessage(@Context() context: any) {
     const userId = getUserIdFromContext(context);
-    return this.pubSub.asyncIterableIterator(['newMessage', `newMessage:${userId}`]);
+    return this.pubSub.asyncIterableIterator([`newMessage:${userId}`]);
   }
 }
