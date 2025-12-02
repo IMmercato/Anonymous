@@ -10,6 +10,7 @@ import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.flow.first
 import java.security.KeyFactory
 import java.security.PublicKey
+import java.security.SecureRandom
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.spec.SecretKeySpec
 
@@ -17,6 +18,11 @@ class GraphQLCryptoService(private val context: Context) {
     private val TAG = "GraphQLCryptoService"
     private val contactRepository = ContactRepository(context)
     private val myUserId = PrefsHelper.getUserUuid(context) ?: throw IllegalStateException("No user ID found")
+
+    companion object {
+        private const val MAX_MESSAGE_SIZE = 1024 * 4
+        private const val PADDING_BLOCK_SIZE = 256
+    }
 
     suspend fun sendEncryptedMessage(receiverId: String, content: String): EncryptedMessageData {
         return try {
@@ -29,10 +35,14 @@ class GraphQLCryptoService(private val context: Context) {
             // Decode receiver's public key
             val receiverPublicKey = decodePublicKey(receiverContact.publicKey)
 
+            // Add Padding to hide message original length
+            val paddedContent = addPadding(content)
+            Log.d(TAG, "Original content: ${content.length} chars, Padded: ${paddedContent.length} chars")
+
             // Check key type and handle accordingly
             when (receiverPublicKey.algorithm) {
-                "RSA" -> encryptWithRSA(receiverId, receiverPublicKey, content)
-                "EC" -> encryptWithECDH(receiverId, receiverPublicKey, content)
+                "RSA" -> encryptWithRSA(receiverId, receiverPublicKey, paddedContent)
+                "EC" -> encryptWithECDH(receiverId, receiverPublicKey, paddedContent)
                 else -> throw IllegalStateException("Unsupported key algorithm: ${receiverPublicKey.algorithm}")
             }
         } catch (e: Exception) {
@@ -101,7 +111,7 @@ class GraphQLCryptoService(private val context: Context) {
 
             val senderPublicKey = decodePublicKey(senderContact.publicKey)
 
-            when (senderPublicKey.algorithm) {
+            val decryptedContent = when (senderPublicKey.algorithm) {
                 "RSA" -> {
                     Log.d(TAG, "Attempting RSA decryption for message from $senderId (sender has RSA key)")
                     val encryptedAesKeyBytes = Base64.decode(encryptedMessage.dhPublicKey, Base64.NO_WRAP)
@@ -115,9 +125,8 @@ class GraphQLCryptoService(private val context: Context) {
                         ct = encryptedMessage.encryptedContent,
                         authTag = encryptedMessage.authTag
                     )
-                    val decryptedContent = CryptoManager.decryptMessage(encryptedData, aesKey)
                     Log.d(TAG, "RSA decryption successful for message from $senderId")
-                    decryptedContent
+                    CryptoManager.decryptMessage(encryptedData, aesKey)
                 }
 
                 "EC" -> {
@@ -135,9 +144,8 @@ class GraphQLCryptoService(private val context: Context) {
                         ct = encryptedMessage.encryptedContent,
                         authTag = encryptedMessage.authTag
                     )
-                    val decryptedContent = CryptoManager.decryptMessage(encryptedData, aesKey)
                     Log.d(TAG, "ECDH decryption successful for message from $senderId")
-                    decryptedContent
+                    CryptoManager.decryptMessage(encryptedData, aesKey)
                 }
 
                 else -> {
@@ -145,10 +153,67 @@ class GraphQLCryptoService(private val context: Context) {
                     throw IllegalStateException("Unsupported key algorithm: ${senderPublicKey.algorithm}")
                 }
             }
+
+            // Remove Padding after Decryption
+            val unpaddedContent = removePadding(decryptedContent)
+            Log.d(TAG, "${senderPublicKey.algorithm} decryption successful for message from $senderId")
+            unpaddedContent
         } catch (e: Exception) {
             Log.e(TAG, "Decryption failed for sender ${encryptedMessage.senderId}", e)
             throw e
         }
+    }
+
+
+    private fun addPadding(message: String): String {
+        val messageBytes = message.toByteArray(Charsets.UTF_8)
+
+        if (messageBytes.size > MAX_MESSAGE_SIZE) {
+            throw IllegalArgumentException("Message too large. Max size $MAX_MESSAGE_SIZE bytes")
+        }
+
+        val targetSize = ((messageBytes.size + PADDING_BLOCK_SIZE - 1) / PADDING_BLOCK_SIZE) * PADDING_BLOCK_SIZE
+
+        val paddedBytes = ByteArray(targetSize)
+
+        System.arraycopy(messageBytes, 0, paddedBytes, 0, messageBytes.size)
+
+        val random = SecureRandom()
+        for (i in messageBytes.size until targetSize) {
+            paddedBytes[i] = random.nextInt(256).toByte()
+        }
+
+        val result = ByteArray(targetSize + 4)
+        result[0] = (messageBytes.size shr 24).toByte()
+        result[1] = (messageBytes.size shr 16).toByte()
+        result[2] = (messageBytes.size shr 8).toByte()
+        result[3] = messageBytes.size.toByte()
+
+        System.arraycopy(paddedBytes, 0, result, 4, paddedBytes.size)
+
+        return  Base64.encodeToString(result, Base64.NO_WRAP)
+    }
+
+    private fun removePadding(paddedMessage: String): String {
+        val decodeBytes = Base64.decode(paddedMessage, Base64.NO_WRAP)
+
+        if (decodeBytes.size < 4) {
+            throw IllegalArgumentException("Invalid padded message format")
+        }
+
+        val originalLength = ((decodeBytes[0].toInt() and 0xFF) shl 24) or
+                ((decodeBytes[1].toInt() and 0xFF) shl 16) or
+                ((decodeBytes[2].toInt() and 0xFF) shl 8) or
+                (decodeBytes[3].toInt() and 0xFF)
+
+        if (originalLength < 0 || originalLength > MAX_MESSAGE_SIZE) {
+            throw IllegalArgumentException("Invalid original length: $originalLength")
+        }
+
+        val originalMessageBytes = ByteArray(originalLength)
+        System.arraycopy(decodeBytes, 4, originalMessageBytes, 0, originalLength)
+
+        return  String(originalMessageBytes, Charsets.UTF_8)
     }
 
     private suspend fun getContact(contactId: String): Contact? {
