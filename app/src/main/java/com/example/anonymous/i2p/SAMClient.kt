@@ -5,6 +5,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.withContext
 import okio.IOException
@@ -12,6 +13,9 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
@@ -183,6 +187,176 @@ class SAMClient private constructor() {
     }
 
     /**
+     * Connect to a peer using STREAM CONNECT
+     */
+    suspend fun connectToPeer(sessionId: String, peerB32: String): Result<Socket> = withContext(Dispatchers.IO) {
+        try {
+            // Open new socket for this connection
+            val connSocket = Socket(SAM_HOST, SAM_PORT)
+            connSocket.soTimeout = 60000
+
+            val reader = BufferedReader(InputStreamReader(connSocket.getInputStream()))
+            val writer = PrintWriter(OutputStreamWriter(connSocket.getOutputStream()), true)
+
+            // HELLO
+            writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
+            val helloResp = reader.readLine()
+            if (!helloResp.startsWith("HELLO REPLY RESULT=OK")) {
+                connSocket.close()
+                return@withContext Result.failure(Exception("HELLO failed: $helloResp"))
+            }
+
+            // STREAM CONNECT
+            writer.println("STREAM CONNECT ID=$sessionId DESTINATION=$peerB32 SILENT=false")
+            val connectResp = reader.readLine()
+
+            if (connectResp.startsWith("STREAM STATUS RESULT=OK")) {
+                Result.success(connSocket)
+            } else {
+                connSocket.close()
+                Result.failure(Exception("STREAM CONNECT failed: $connectResp"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Accept incoming connections
+     */
+    suspend fun acceptConnection(sessionId: String): Result<Pair<Socket, String>> = withContext(Dispatchers.IO) {
+        try {
+            val acceptSocket = Socket(SAM_HOST, SAM_PORT)
+            acceptSocket.soTimeout = 0  // Block untill connection
+
+            val reader = BufferedReader(InputStreamReader(acceptSocket.getInputStream()))
+            val writer = PrintWriter(OutputStreamWriter(acceptSocket.getOutputStream()), true)
+
+            // HELLO
+            writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
+            val helloResp = reader.readLine()
+            if (!helloResp.startsWith("HELLO REPLY RESULT=OJ")) {
+                acceptSocket.close()
+                return@withContext Result.failure(Exception("HELLO failed"))
+            }
+
+            // STREAM ACCEPT
+            writer.println("STREAM ACCEPT ID=$sessionId SILENT=false")
+            val acceptResp = reader.readLine()
+
+            if (acceptResp.startsWith("STREAM STATUS RESULT=OK")) {
+                // Read peer destination
+                val peerDest = reader.readLine()
+                Log.i(TAG, "Accepted connection from: $peerDest")
+                Result.success(Pair(acceptSocket, peerDest))
+            } else {
+                acceptSocket.close()
+                Result.failure(Exception("STREAM ACCEPT failed: $acceptResp"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Send a repliable datagram
+     */
+    suspend fun sendDatagram(
+        sessionId: String,
+        peerB32: String,
+        data: ByteArray
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val session = activeSessions[sessionId] ?: return@withContext Result.failure(Exception("Session not found"))
+
+            if (session.style != SessionStyle.DATAGRAM) {
+                return@withContext Result.failure(Exception("Not a DATAGRAM session"))
+            }
+
+            // Send via SAM UDP port
+            val udpSocket = DatagramSocket()
+
+            // Build datagram header
+            val header = "3.0 $sessionId $peerB32\n".toByteArray(Charsets.UTF_8)
+            val packetData = header + data
+
+            val packet = DatagramPacket(
+                packetData,
+                packetData.size,
+                InetAddress.getByName(SAM_HOST),
+                7655
+            )
+
+            udpSocket.send(packet)
+            udpSocket.close()
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Look up a destination by b32 address
+     */
+    suspend fun namingLookup(name: String): Result<String> = withContext(Dispatchers.IO) {
+        try {
+            sendCommand("NAMING LOOKUP NAME=$name")
+            val response = readResponse()
+
+            if (response.startsWith("NAMING REPLY RESULT=OK")) {
+                val destination = extractValue(response, "VALUE")
+                if (destination != null) {
+                    Result.success(destination)
+                } else {
+                    Result.failure(Exception("NO VALUE in response"))
+                }
+            } else {
+                Result.failure(Exception("Lookup failed: $response"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Generate a new destination
+     */
+    suspend fun generateDestination(): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
+        try {
+            sendCommand("DEST GENERATE SIGNATURE_TYPE=$SIGNATURE_TYPE")
+            val response = readResponse()
+
+            if (response.startsWith("DEST REPLY")) {
+                val pub = extractValue(response, "PUB")
+                val priv = extractValue(response, "PRIV")
+
+                if (pub != null && priv != null) {
+                    Result.success(Pair(pub, priv))
+                } else {
+                    Result.failure(Exception("Incomplete DEST REPLY"))
+                }
+            } else {
+                Result.failure(Exception("DEST GENERATE failed: $response"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Remove a session
+     */
+    fun removeSession(sessionId: String) {
+        activeSessions.remove(sessionId)
+    }
+
+    /**
+     * Get all active session
+     */
+    fun getActiveSessions(): List<SAMSession> = activeSessions.values.toList()
+
+    /**
      * Disconnect from SAM bridge
      */
     fun disconnect() {
@@ -194,6 +368,14 @@ class SAMClient private constructor() {
         } catch (e: Exception) {
             Log.e(TAG, "Error disconnecting", e)
         }
+    }
+
+    /**
+     * Cleanup resources
+     */
+    fun cleanup() {
+        disconnect()
+        scope.cancel()
     }
 
     // Private helpers
