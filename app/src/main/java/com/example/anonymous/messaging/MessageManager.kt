@@ -13,6 +13,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -289,11 +291,22 @@ class MessageManager private constructor(context: Context) {
     /**
      * Send message over I2P connection
      */
-    private fun sendOverI2P(connection: PeerConnection, message: NetworkMessage) {
-        val socket = connection.socket ?: throw IllegalStateException("No socket")
-        val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream()), true)
+    private fun sendOverI2P(connection: PeerConnection, message: NetworkMessage): Boolean {
+        return try {
+            val json = gson.toJson(message)
+            connection.writer.println(json)
+            connection.writer.flush()
 
-        val json = gson.toJson(message)
+            activeConnections[connection.contactB32] = connection.copy(
+                lastActivity = System.currentTimeMillis()
+            )
+
+            Log.d(TAG, "Sent message ${message.messageId} to ${connection.contactB32}")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send over I2P", e)
+            false
+        }
     }
 
     /**
@@ -366,6 +379,23 @@ class MessageManager private constructor(context: Context) {
      * Listen for messages on outgoing connection (bidirectional)
      */
     private fun startConnectionListener(connection: PeerConnection)  {
+        scope.launch {
+            try {
+                while (isActive && !connection.socket.isClosed) {
+                    val line = connection.reader.readLine() ?: break
+                    if (line.isNotBlank()) {
+                        processIncomingMessage(line, connection.contactB32)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e !is CancellationException) {
+                    Log.e(TAG, "Listener error fro ${connection.contactB32}", e)
+                }
+            } finally {
+                closeConnection(connection)
+                activeConnections.remove(connection.contactB32)
+            }
+        }
     }
 
     /**
@@ -486,7 +516,7 @@ class MessageManager private constructor(context: Context) {
         }
     }
 
-    private suspend fun getMyB32Address(): String? {
+    private fun getMyB32Address(): String? {
         return samClient.getActiveSessions().firstOrNull()?.b32Address ?: contactRepository.getMyIdentity()?.b32Address
     }
 
@@ -507,7 +537,24 @@ class MessageManager private constructor(context: Context) {
     }
 
     private fun getRecipientPublicKey(b32Address: String): PublicKey? {
-        return cryptoManager.getContactPublicKey(context, b32Address)
+        // Check  contact
+        val contact = runBlocking { contactRepository.getContactByB32(b32Address) }
+
+        // Try from contact storage
+        val storeKey = cryptoManager.getContactPublicKey(context, b32Address)
+        if (storeKey != null) return storeKey
+
+        // decode publickey if string
+        contact?.publicKey?.let { pubKeyStr ->
+            return try {
+                val pubKeyBytes = Base64.decode(pubKeyStr, Base64.NO_WRAP)
+                decodeECPublicKey(pubKeyBytes)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to decode contact public key", e)
+                null
+            }
+        }
+        return null
     }
 
     private fun getMyKeyPair(): KeyPair? {
@@ -524,5 +571,13 @@ class MessageManager private constructor(context: Context) {
         val salt = ByteArray(16)
         SecureRandom().nextBytes(salt)
         return salt
+    }
+
+    fun cleanup() {
+        scope.cancel()
+        activeConnections.values.forEach { closeConnection(it) }
+        activeConnections.clear()
+        samClient.disconnect()
+        Log.i(TAG, "MessageManager cleaned up")
     }
 }
