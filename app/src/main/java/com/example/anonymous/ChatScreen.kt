@@ -62,16 +62,22 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.datastore.preferences.core.Preferences
 import com.example.anonymous.datastore.ChatCustomizationSettings
+import com.example.anonymous.i2p.I2pdDaemon
+import com.example.anonymous.messaging.MessageManager
 import com.example.anonymous.network.ConnectionStatus
+import com.example.anonymous.network.GraphQLCryptoService
 import com.example.anonymous.network.GraphQLMessageService
 import com.example.anonymous.network.model.Message
+import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.repository.MessageRepository
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.runtime.collectAsState
 
 sealed class IconType(val action: (String) -> String) {
     data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
@@ -88,8 +94,11 @@ fun ChatScreen(
 ) {
     val context = LocalContext.current
     val messageRepository = remember { MessageRepository(context) }
-    val messageService = remember { GraphQLMessageService(context) }
-    val currentUserId = PrefsHelper.getUserUuid(context) ?: ""
+    val messageManager = remember { MessageManager.getInstance(context) }
+    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
+    val contactRepository = remember { ContactRepository.getInstance(context) }
+
+    val currentUserId = remember { contactRepository.getMyIdentity()?.b32Address ?: PrefsHelper.getUserUuid(context) ?: "" }
 
     var messages by remember { mutableStateOf(emptyList<Message>()) }
     var message by remember { mutableStateOf("") }
@@ -97,8 +106,9 @@ fun ChatScreen(
     var isCodeFormat by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     var connectionStatus by remember {
-        mutableStateOf<ConnectionStatus>(ConnectionStatus.Connecting)
+        mutableStateOf<I2pdDaemon.DaemonState>(I2pdDaemon.DaemonState.STOPPED)
     }
+    var isInitializing by remember { mutableStateOf(false) }
 
     val iconList = listOf(
         IconType.Vector(Icons.Default.Favorite, { text -> "❤️ $text ❤️" }),
@@ -113,54 +123,85 @@ fun ChatScreen(
         })
     )
 
-    LaunchedEffect(messageService) {
-        messageService.connectionStatus.collect {
-            connectionStatus = it
+    // Initialize I2P daemon and messaging
+    LaunchedEffect(Unit) {
+        if (!i2pdDaemon.isRunning() && !isInitializing) {
+            isInitializing = true
+            i2pdDaemon.start()
         }
+
+        i2pdDaemon.addListener(object : I2pdDaemon.DaemonStateListener {
+            override fun onStateChanged(state: I2pdDaemon.DaemonState) {
+                connectionStatus = state
+                if (state == I2pdDaemon.DaemonState.READY) {
+                    coroutineScope.launch {
+                        val success = messageManager.initialize()
+                        if (success) {
+                            Log.i("ChatScreen", "MessageManger initialized successfully")
+                        } else {
+                            Log.e("ChatScreen", "Failed to initialize MessageManager")
+                        }
+                    }
+                }
+            }
+
+            override fun onError(error: String) {
+                Log.e("ChatScreen", "I2P Error: $error")
+                connectionStatus = I2pdDaemon.DaemonState.ERROR
+            }
+        })
     }
 
     // Load messages on start
     LaunchedEffect(contactId) {
-        // Load from local database first (decrypting them)
-        val localMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
+        val cryptoService = GraphQLCryptoService(context)
+        val localMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
         messages = localMessagesDecrypted
+    }
 
-        // Initialize real-time messaging
-        messageService.initializeRealTimeMessaging(contactId)
-
-        // Then try to refresh from server
-        try {
-            val serverMessages = messageService.fetchMessagesForContact(contactId) // These are already decrypted
-            if (serverMessages.isNotEmpty()) {
-                // Add the *encrypted* versions to the repository
-                serverMessages.forEach { messageRepository.addMessage(it) }
-                // Reload and decrypt from repo for UI state
-                val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
-                messages = updatedMessagesDecrypted
+    // Listen for incoming I2P messages
+    LaunchedEffect(messageManager) {
+        messageManager.incomingMessages.collect { newMessage ->
+            try {
+                messageRepository.addMessage(newMessage)
+                val cryptoService = GraphQLCryptoService(context)
+                val updatedMessages = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
+                messages = updatedMessages
+            } catch (e: Exception) {
+                Log.e("ChatScreen", "Error processing new message", e)
             }
-        } catch (e: Exception) {
-            Log.e("ChatScreen", "Error refreshing messages", e)
-            // Optionally show error to user, but local messages are already loaded
         }
     }
 
-    // Listen for real-time messages
-    LaunchedEffect(messageService) {
-        messageService.newMessages.collect { newDecryptedMessageFromServer ->
-            try {
-                messageRepository.addMessage(newDecryptedMessageFromServer)
-                val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
-                messages = updatedMessagesDecrypted
-            } catch (e: Exception) {
-                Log.e("ChatScreen", "Error processing new message or updating UI", e)
-            }
+    // Listen for message status updates
+    LaunchedEffect(messageManager) {
+        messageManager.messageStatus.collect { status ->
+            Log.d("ChatScreen", "Message ${status.messageId} status: ${status.status}")
         }
     }
 
     // Cleanup on exit
     DisposableEffect(Unit) {
         onDispose {
-            messageService.stopRealTimeMessaging()
+            Log.d("ChatScreen", "Leaving chat with $contactId")
+        }
+    }
+
+    @Composable
+    fun getConnectionStatusText(): Pair<String, Color> {
+        return when (connectionStatus) {
+            I2pdDaemon.DaemonState.STOPPED -> "I2P Stopped" to Color.Gray
+            I2pdDaemon.DaemonState.STARTING -> "Starting I2P..." to Color.Yellow
+            I2pdDaemon.DaemonState.WAITING_FOR_NETWORK -> "Waiting for network..." to Color.Yellow
+            I2pdDaemon.DaemonState.BUILDING_TUNNELS -> "Building tunnels..." to Color.Yellow
+            I2pdDaemon.DaemonState.READY -> {
+                if (messageManager.connectionState.collectAsState().value == MessageManager.ConnectionState.Connected) {
+                    "Connected (I2P)" to Color.Green
+                } else {
+                    "Connecting..." to Color.Yellow
+                }
+            }
+            I2pdDaemon.DaemonState.ERROR -> "I2P Error" to Color.Red
         }
     }
 
@@ -170,12 +211,12 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text("Chat with $contactName")
-                        when(connectionStatus) {
-                            is ConnectionStatus.Connecting -> Text("Connecting...", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                            is ConnectionStatus.Connected -> Text("Connected", style = MaterialTheme.typography.bodySmall, color = Color.Green)
-                            is ConnectionStatus.Polling -> Text("Polling for updates...", style = MaterialTheme.typography.bodySmall, color = Color.Yellow)
-                            is ConnectionStatus.Disconnected -> Text("Offline", style = MaterialTheme.typography.bodySmall, color = Color.Red)
-                        }
+                        val (statusText, statusColor) = getConnectionStatusText()
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = statusColor
+                        )
                     }
                 },
                 navigationIcon = {
@@ -292,48 +333,26 @@ fun ChatScreen(
                                 if (message.isNotBlank() && !isLoading) {
                                     isLoading = true
                                     coroutineScope.launch {
-                                        val success = messageService.sendMessage(contactId, message)
+                                        try {
+                                            val result = messageManager.sendMessage(contactId, message)
 
-                                        if (success) {
-                                            // --- SEND SUCCESS LOGIC ---
-                                            // 1. Encrypt the message again (or reuse the data sent if service provides it)
-                                            //    We already sent it encrypted via messageService.sendMessage.
-                                            //    Now we need to create the *encrypted* Message object to save locally.
-                                            val encryptedData = messageService.cryptoService.sendEncryptedMessage(contactId, message)
-
-                                            // 2. Create the *encrypted* Message object for local storage
-                                            val encryptedMessageForStorage = Message(
-                                                id = System.currentTimeMillis().toString(), // Server should provide ID, but using local as placeholder
-                                                content = message,
-                                                encryptedContent = encryptedData.encryptedContent,
-                                                senderId = currentUserId,
-                                                receiverId = contactId,
-                                                timestamp = System.currentTimeMillis(), // Server should provide timestamp, but using local as placeholder
-                                                isRead = false, // Outgoing message, initially not read by receiver
-                                                iv = encryptedData.iv,
-                                                authTag = encryptedData.authTag,
-                                                version = encryptedData.version,
-                                                dhPublicKey = encryptedData.dhPublicKey
-                                            )
-
-                                            // 3. Save the *encrypted* message to the repository
-                                            messageRepository.addMessage(encryptedMessageForStorage)
-
-                                            // 4. Reload and decrypt from repo for UI state (or manage state diff more efficiently)
-                                            //    This ensures the message shown in the UI is consistent with what's stored.
-                                            val updatedMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, messageService.cryptoService)
-                                            messages = updatedMessagesDecrypted
-
-
-                                            // Clear input
-                                            message = ""
-                                            isCodeFormat = false
-                                        } else {
-                                            // Handle send failure (e.g., show error, keep message in input)
-                                            Log.e("ChatScreen", "Failed to send message")
-                                            // You might want to show a snackbar or toast
+                                            if (result.isSuccess) {
+                                                val cryptoService = GraphQLCryptoService(context)
+                                                val updatedMessages = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
+                                                messages = updatedMessages
+                                                message = ""
+                                                isCodeFormat = false
+                                                Log.d("ChatScreen", "Message sent successfully via I2P")
+                                            } else {
+                                                Log.w("ChatScreen", "I2P sen failed, queuing for offline: ${result.exceptionOrNull()?.message}")
+                                                // Offline Handler & UI updates
+                                                isCodeFormat = false
+                                            }
+                                        } catch (e: Exception) {
+                                            Log.e("ChatScreen", "Error sending message", e)
+                                        } finally {
+                                            isLoading = false
                                         }
-                                        isLoading = false
                                     }
                                 }
                             },
