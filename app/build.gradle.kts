@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlinx.serialization)
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -17,6 +18,10 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ksp {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
@@ -66,8 +71,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.material3)
     implementation(libs.androidx.adaptive.android)
-    implementation(libs.google.accompanist.permissions)
-    implementation(libs.accompanist.permissions.v0350alpha)
+    implementation(libs.accompanist.permissions)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
@@ -93,7 +97,6 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
     implementation(libs.generativeai)
     implementation(libs.androidx.datastore.preferences)
@@ -102,6 +105,10 @@ dependencies {
     implementation(libs.androidx.security.crypto)
     implementation(libs.androidx.localbroadcastmanager)
     implementation(libs.logging.interceptor)
+    implementation(libs.androidx.room.common.jvm)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
