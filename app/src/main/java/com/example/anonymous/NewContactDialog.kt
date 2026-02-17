@@ -6,28 +6,42 @@ import android.content.pm.PackageManager
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.*
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.crypto.CryptoManager
-import com.example.anonymous.network.GraphQLCryptoService
+import com.example.anonymous.i2p.I2pQRUtils
+import com.example.anonymous.i2p.ParsedI2PIdentity
 import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
-import com.example.anonymous.utils.JwtUtils
-import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.launch
 
 @Composable
@@ -38,7 +52,7 @@ fun NewContactDialog(
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
-    val contactRepository = remember { ContactRepository(context) }
+    val contactRepository = remember { ContactRepository.getInstance(context) }
 
     var hasPermission by remember {
         mutableStateOf(
@@ -47,8 +61,7 @@ fun NewContactDialog(
         )
     }
 
-    var scannedUuid by remember { mutableStateOf<String?>(null) }
-    var scannedPublicKey by remember { mutableStateOf<String?>(null) }
+    var scannedIdentity by remember { mutableStateOf<ParsedI2PIdentity?>(null) }
     var contactName by remember { mutableStateOf("") }
     var duplicateError by remember { mutableStateOf(false) }
     var scanError by remember { mutableStateOf<String?>(null) }
@@ -68,139 +81,154 @@ fun NewContactDialog(
         }
     }
 
-    if (hasPermission) {
-        if (scannedUuid == null) {
-            AlertDialog(
-                onDismissRequest = onDismiss,
-                title = { Text("Scan QR Code") },
-                text = {
-                    Column {
-                        scanError?.let { error ->
-                            Text(
-                                text = error,
-                                color = androidx.compose.ui.graphics.Color.Red,
-                                modifier = Modifier.padding(bottom = 8.dp)
-                            )
-                        }
-                        Box(modifier = Modifier.height(300.dp)) {
-                            CameraQrScanner(
-                                context = context,
-                                lifecycleOwner = lifecycleOwner,
-                                onQrDecoded = { text ->
-                                    try {
-                                        // Validate that this is a JWT and extract UUID
-                                        if (JwtUtils.isJwtValid(text)) {
-                                            val uuid = JwtUtils.extractUuidFromJwt(text)
-                                            val publicKey = JwtUtils.extractPublicKeyFromJwt(text)
-                                            if (!uuid.isNullOrBlank() && !publicKey.isNullOrBlank()) {
-                                                scannedUuid = uuid
-                                                scannedPublicKey = publicKey
-                                                scanError = null
-                                            } else {
-                                                scanError = "Invalid QR code: No UUID found"
-                                            }
-                                        } else {
-                                            scanError = "Invalid or expired QR code"
-                                        }
-                                    } catch (e: Exception) {
-                                        scanError = "Failed to scan QR code: ${e.message}"
-                                    }
-                                },
-                                onError = {
-                                    scanError = "Camera error occurred"
-                                }
-                            )
-                        }
+    if (!hasPermission) return
+
+    if (scannedIdentity == null) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Scan QR Code") },
+            text = {
+                Column {
+                    scanError?.let { error ->
+                        Text(
+                            text = error,
+                            color = Color.Red,
+                            modifier = Modifier.padding(bottom = 8.dp)
+                        )
                     }
-                },
-                confirmButton = {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel")
+                    Box(modifier = Modifier.height(300.dp)) {
+                        CameraQrScanner(
+                            context = context,
+                            lifecycleOwner = lifecycleOwner,
+                            onQrDecoded = { text ->
+                                val parsed = I2pQRUtils.parseQRContent(text)
+                                when {
+                                    parsed == null -> {
+                                        scanError = "Invalid QR code - not an Anonymous identity."
+                                    }
+                                    else -> {
+                                        contactName = "Contact ${parsed.b32Address.take(8)}"
+                                        scannedIdentity = parsed
+                                        scanError = null
+                                    }
+                                }
+                            },
+                            onError = {
+                                scanError = "Camera error occurred"
+                            }
+                        )
                     }
                 }
-            )
-        } else {
-            AlertDialog(
-                onDismissRequest = {
-                    scannedUuid = null
+            },
+            confirmButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+            }
+        )
+        return
+    }
+
+    val identity = scannedIdentity!!
+
+    AlertDialog(
+        onDismissRequest = {
+            scannedIdentity = null
+            contactName = ""
+            duplicateError = false
+            scanError = null
+        },
+        title = { Text("Add Anonymous Contact") },
+        text = {
+            Column {
+                Text(
+                    text = "I2P address:",
+                    fontSize = 12.sp,
+                    color = Color.Gray
+                )
+                Text(
+                    text = identity.b32Address,
+                    fontSize = 12.sp
+                )
+                if (identity.i2pDestination != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Full destination included",
+                        color = Color.Green,
+                        fontSize = 11.sp
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+                TextField(
+                    value = contactName,
+                    onValueChange = { contactName = it },
+                    label = { Text("Contact Name") },
+                    singleLine = true
+                )
+                if (duplicateError) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("This contact is already in your address book.", color = Color.Red)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = contactName.isNotBlank(),
+                onClick = {
+                    coroutineScope.launch {
+                        val exists = contactRepository.contactExists(identity.b32Address)
+
+                        val myB32 = contactRepository.getMyIdentity()?.b32Address
+                        if (myB32.equals(identity.b32Address, ignoreCase = true)) {
+                            scanError = "Cannot add yourself as a contact."
+                            scannedIdentity = null
+                            return@launch
+                        }
+
+                        if (exists) {
+                            duplicateError = true
+                            return@launch
+                        }
+
+                        val contact = Contact(
+                            b32Address = identity.b32Address,
+                            name = contactName.trim(),
+                            publicKey = identity.ecPublicKey ?: identity.i2pDestination ?: "",
+                            isVerified = false
+                        )
+                        contactRepository.addContact(contact)
+
+                        val myIdentity = contactRepository.getMyIdentity()
+                        if (myIdentity != null) {
+                            val existing = CryptoManager.getContactKeyPair(context, myIdentity.b32Address)
+                            if (existing == null) {
+                                val myKeyPair = CryptoManager.generateECDHKeyPair()
+                                CryptoManager.saveKeyPair(context, myIdentity.b32Address, myKeyPair)
+                                Log.d("NewContactDialog", "Generated ECDH key pair for own identity")
+                            }
+                        }
+
+                        onContactAdded(contact)
+                        onDismiss()
+                    }
+                }
+            ) {
+                Text("Add Contact")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = {
+                    scannedIdentity = null
                     contactName = ""
                     duplicateError = false
                     scanError = null
-                },
-                title = { Text("Add Contact") },
-                text = {
-                    Column {
-                        Text("Scanned ID: ${scannedUuid?.take(10)}...")
-                        Spacer(modifier = Modifier.height(16.dp))
-                        TextField(
-                            value = contactName,
-                            onValueChange = { contactName = it },
-                            label = { Text("Contact Name") }
-                        )
-                        if (duplicateError) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text("Contact already exists.", color = androidx.compose.ui.graphics.Color.Red)
-                        }
-                    }
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            coroutineScope.launch {
-                                scannedUuid?.let { uuid ->
-                                    val exists = contactRepository.contactExists(uuid)
-                                    if (!exists) {
-                                        val newContact = Contact(
-                                            uuid = uuid,
-                                            name = contactName,
-                                            publicKey = scannedPublicKey ?: ""
-                                        )
-                                        contactRepository.addContact(newContact)
-
-                                        // Generate key pair that matches the contact's algorithm
-                                        val myUserId = PrefsHelper.getUserUuid(context) ?: return@launch
-                                        if (CryptoManager.getKeyPair(context, myUserId) == null) {
-                                            val contactPublicKeyObj = GraphQLCryptoService(context).decodePublicKey(scannedPublicKey ?: "")
-                                            val myKeyPair = when (contactPublicKeyObj.algorithm) {
-                                                "EC" -> CryptoManager.generateECDHKeyPair()
-                                                "RSA" -> CryptoManager.generateRSAKeyPair()
-                                                else -> throw IllegalStateException("Unsupported key algorithm")
-                                            }
-                                            // Save the generated key pair under MY user ID
-                                            CryptoManager.saveKeyPair(context, myUserId, myKeyPair)
-                                            Log.d("NewContactAdding", "Generated and saved identity key pair for user: $myUserId")
-                                        } else {
-                                            Log.d("NewContactAdding", "Identity key pair already exists for user: $myUserId")
-                                        }
-
-                                        onContactAdded(newContact)
-                                        onDismiss()
-                                    } else {
-                                        duplicateError = true
-                                    }
-                                }
-                            }
-                        },
-                        enabled = contactName.isNotBlank() && scannedPublicKey?.isNotBlank() == true
-                    ) {
-                        Text("Add")
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = {
-                            scannedUuid = null
-                            contactName = ""
-                            duplicateError = false
-                            scanError = null
-                        }
-                    ) {
-                        Text("Cancel")
-                    }
                 }
-            )
+            ) {
+                Text("Scan Again")
+            }
         }
-    }
+    )
 }
 
 @Composable
@@ -265,7 +293,12 @@ private fun bindAnalysisUseCase(
                 }
             }
 
-        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analyzer)
+        cameraProvider.bindToLifecycle(
+            lifecycleOwner,
+            CameraSelector.DEFAULT_BACK_CAMERA,
+            preview,
+            analyzer
+        )
     } catch (e: Exception) {
         // Handle camera binding errors
     }
