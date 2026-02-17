@@ -3,9 +3,10 @@ package com.example.anonymous
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Bundle
-import android.view.WindowManager
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -24,25 +25,25 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.view.WindowCompat
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.datastore.CommunityCustomizationSettings
 import com.example.anonymous.datastore.getChatCustomizationSettings
 import com.example.anonymous.datastore.getCommunityCustomizationSettings
+import com.example.anonymous.i2p.I2pdDaemon
+import com.example.anonymous.i2p.SAMClient
+import com.example.anonymous.messaging.MessageManager
 import com.example.anonymous.network.model.Contact
+import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.ui.theme.AnonymousTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        )
+        enableEdgeToEdge()
         setContent {
             AnonymousTheme {
                 MainScreen()
@@ -74,6 +75,17 @@ fun MainScreen() {
     val coroutineScope = rememberCoroutineScope()
     var showingAuthor by remember { mutableStateOf(false) }
 
+    // I2P State
+    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
+    val samClient = remember { SAMClient.getInstance() }
+    val messageManager = remember { MessageManager.getInstance(context) }
+    val contactRepository = remember { ContactRepository.getInstance(context) }
+
+    var i2pState by remember { mutableStateOf(I2pdDaemon.DaemonState.STOPPED) }
+    var isI2PReady by remember { mutableStateOf(false) }
+    var showI2PInitializing by remember { mutableStateOf(false) }
+
+    // Identity check
     val identityFileName = "qr_identity.png"
     var identityBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var isIdentityChecked by remember { mutableStateOf(false) }
@@ -82,18 +94,92 @@ fun MainScreen() {
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
     var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
 
-    // Asynchronous identity check
+    // Initialize I2P
     LaunchedEffect(Unit) {
         identityBitmap = Controller.checkIdentityExists(context, identityFileName)
         isIdentityChecked = true
+
+        if (identityBitmap != null) {
+            showI2PInitializing = true
+
+            i2pdDaemon.addListener(object : I2pdDaemon.DaemonStateListener {
+                override fun onStateChanged(state: I2pdDaemon.DaemonState) {
+                    coroutineScope.launch(Dispatchers.Main) {
+                        i2pState = state
+                        when (state) {
+                            I2pdDaemon.DaemonState.READY -> {
+                                coroutineScope.launch {
+                                    // Initialize SAM and MessageManger
+                                    val samConnected = samClient.connect()
+                                    if (samConnected) {
+                                        val sessionResult = samClient.createStreamSession()
+                                        if (sessionResult.isSuccess) {
+                                            val session = sessionResult.getOrThrow()
+
+                                            val existingIdentity = contactRepository.getMyIdentity()
+                                            if (existingIdentity == null) {
+                                                val identity = ContactRepository.MyIdentity(
+                                                    b32Address = session.b32Address,
+                                                    publicKey = session.destination,
+                                                    privateKeyEncrypted = ""
+                                                )
+                                                contactRepository.saveMyIdentity(identity)
+                                            }
+
+                                            val msgInitSuccess = messageManager.initialize()
+                                            isI2PReady = msgInitSuccess
+                                            if (msgInitSuccess) {
+                                                messageManager.startListening(session.id)
+                                            }
+                                        }
+                                    }
+                                    showI2PInitializing = false
+                                }
+                            }
+                            I2pdDaemon.DaemonState.ERROR -> {
+                                showI2PInitializing = false
+                            }
+                            else -> {}
+                        }
+                    }
+                }
+
+                override fun onError(error: String) {
+                    showI2PInitializing = false
+                }
+            })
+
+            i2pdDaemon.start()
+        }
     }
 
-    if (!isIdentityChecked) {
+    DisposableEffect(Unit) {
+        onDispose {
+            Log.d("MainActivity", "MainActivity disposed but I2P keeps running")
+        }
+    }
+
+    if (!isIdentityChecked || showI2PInitializing) {
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
         ) {
-            CircularProgressIndicator()
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = if (!isIdentityChecked) "Checking identity..." else "Initializing I2P network...",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                if (showI2PInitializing) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "State: ${i2pState.name}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                }
+            }
         }
     } else {
         if (identityBitmap != null) {
@@ -106,7 +192,7 @@ fun MainScreen() {
                 )
             } else if (selectedContact != null) {
                 ChatScreen(
-                    contactId = selectedContact!!.uuid,
+                    contactId = selectedContact!!.b32Address,
                     contactName = selectedContact!!.name,
                     customizationSettings = chatCustomizationSettings,
                     onBack = { selectedContact = null }
