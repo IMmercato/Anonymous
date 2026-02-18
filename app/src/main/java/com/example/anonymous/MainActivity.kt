@@ -40,8 +40,10 @@ import com.example.anonymous.messaging.MessageManager
 import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.ui.theme.AnonymousTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
@@ -60,16 +62,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.i("MainActivity", "onDestroy called, isFinishing=$isFinishing")
 
         if (isFinishing) {
-            Log.i("MainActivity", "Activity finishing")
-            Thread {
-                try {
-                    I2pdDaemon.getExistingInstance()?.cleanup()
-                } catch (e: Exception) {
-                    Log.e("MainActivity", "Cleanup error", e)
-                }
-            }.start()
+            Log.i("MainActivity", "Activity finishing - BUT NOT STOPPING I2P!")
+            Log.i("MainActivity", "I2P daemon keeps running for the entire app process")
         }
     }
 }
@@ -118,32 +115,69 @@ fun MainScreen() {
 
     // Initialize I2P only if identity exists
     LaunchedEffect(Unit) {
+        Log.i("MainActivity", "LaunchedEffect: Checking identity...")
         identityBitmap = Controller.checkIdentityExists(context, identityFileName)
         isIdentityChecked = true
+        Log.i("MainActivity", "Identity exists: ${identityBitmap != null}")
 
-        if (identityBitmap != null && !i2pdDaemon.isRunning()) {
-            showI2PInitializing = true
+        if (identityBitmap != null) {
+            if (!i2pdDaemon.isRunning()) {
+                Log.i("MainActivity", "I2P not running, starting...")
+                showI2PInitializing = true
 
-            // Start daemon
-            i2pdDaemon.start()
+                // Start daemon
+                val started = withContext(Dispatchers.IO) { i2pdDaemon.start() }
+                Log.i("MainActivity", "i2pdDaemon.start() returned: $started")
 
-            // Wait for ready
-            val ready = i2pdDaemon.waitForReady()
+                if (started) {
+                    // Wait for ready
+                    Log.i("MainActivity", "Waiting for I2P ready...")
+                    val ready = withContext(Dispatchers.IO) { i2pdDaemon.waitForReady() }
+                    Log.i("MainActivity", "i2pdDaemon.waitForReady() returned: $ready")
 
-            if (ready) {
-                // Initialize SAM and MessageManager
-                val samConnected = samClient.connect()
-                if (samConnected) {
-                    val msgInitSuccess = messageManager.initialize()
-                    isI2PReady = msgInitSuccess
-                    if (msgInitSuccess) {
-                        val session = samClient.getActiveSessions().firstOrNull()
-                        session?.let { messageManager.startListening(it.id) }
+                    if (ready) {
+                        // Initialize SAM and MessageManager
+                        Log.i("MainActivity", "Connecting to SAM...")
+                        val samConnected = samClient.connect()
+                        Log.i("MainActivity", "samClient.connect() returned: $samConnected")
+
+                        if (samConnected) {
+                            Log.i("MainActivity", "Initializing MessageManager...")
+                            val msgInitSuccess = messageManager.initialize()
+                            Log.i("MainActivity", "messageManager.initialize() returned: $msgInitSuccess")
+                            isI2PReady = msgInitSuccess
+                            if (msgInitSuccess) {
+                                val session = samClient.getActiveSessions().firstOrNull()
+                                Log.i("MainActivity", "Active SAM sessions: ${samClient.getActiveSessions().size}")
+                                session?.let {
+                                    Log.i("MainActivity", "Starting to listen on session: ${it.id}")
+                                    messageManager.startListening(it.id)
+                                }
+                            }
+                        } else {
+                            Log.e("MainActivity", "SAM connection failed!")
+                        }
+                    } else {
+                        Log.e("MainActivity", "I2P failed to become ready!")
+                    }
+                } else {
+                    Log.e("MainActivity", "i2pdDaemon.start() failed!")
+                }
+
+                showI2PInitializing = false
+            } else {
+                Log.i("MainActivity", "I2P already running, reusing existing daemon")
+                isI2PReady = true
+                val msgInitSuccess = messageManager.initialize()
+                if (msgInitSuccess) {
+                    val session = samClient.getActiveSessions().firstOrNull()
+                    session?.let {
+                        messageManager.startListening(it.id)
                     }
                 }
             }
-
-            showI2PInitializing = false
+        } else {
+            Log.i("MainActivity", "No identity found, redirecting to registration")
         }
     }
 
