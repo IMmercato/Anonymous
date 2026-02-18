@@ -11,21 +11,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,9 +36,7 @@ import com.example.anonymous.i2p.SAMClient
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.ui.theme.AnonymousTheme
 import com.example.anonymous.utils.PrefsHelper
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.security.KeyStore
 
 class RegistrationActivity : ComponentActivity() {
@@ -63,10 +60,7 @@ class RegistrationActivity : ComponentActivity() {
     @Composable
     fun RegistrationScreen() {
         val context = LocalContext.current
-
-        // Use lifecycleScope which is tied to Activity lifecycle
-        // BUT the daemon runs in its own thread so it survives config changes
-        val coroutineScope = rememberCoroutineScope()
+        val scope = rememberCoroutineScope()
 
         val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
         val samClient = remember { SAMClient.getInstance() }
@@ -80,8 +74,10 @@ class RegistrationActivity : ComponentActivity() {
 
         // Check for existing identity
         LaunchedEffect(Unit) {
+            Log.i(TAG, "Checking for existing identity...")
             val existingIdentity = contactRepository.getMyIdentity()
             if (existingIdentity != null) {
+                Log.i(TAG, "Found existing identity: ${existingIdentity.b32Address}")
                 myB32 = existingIdentity.b32Address
                 val qrContent = I2pQRUtils.generateQRContent(
                     b32Address = existingIdentity.b32Address,
@@ -91,6 +87,151 @@ class RegistrationActivity : ComponentActivity() {
                 identityBitmap = withContext(Dispatchers.IO) {
                     Controller.generateQRCode(qrContent)
                 }
+                Log.i(TAG, "QR code generated from existing identity")
+            } else {
+                Log.i(TAG, "No existing identity found")
+            }
+        }
+
+        // Setup daemon listener
+        DisposableEffect(i2pdDaemon) {
+            val listener = object : I2pdDaemon.DaemonStateListener {
+                override fun onStateChanged(state: I2pdDaemon.DaemonState) {
+                    Log.d(TAG, "Daemon state changed: $state")
+                    statusText = when (state) {
+                        I2pdDaemon.DaemonState.STARTING -> "Starting I2P..."
+                        I2pdDaemon.DaemonState.BUILDING_TUNNELS -> "Building tunnels..."
+                        I2pdDaemon.DaemonState.WAITING_FOR_NETWORK -> "Waiting for network..."
+                        I2pdDaemon.DaemonState.READY -> "I2P Ready!"
+                        else -> state.name
+                    }
+                }
+
+                override fun onError(error: String) {
+                    Log.e(TAG, "Daemon error: $error")
+                    errorMessage = error
+                    isLoading = false
+                }
+            }
+
+            i2pdDaemon.addListener(listener)
+            onDispose {
+                Log.d(TAG, "Removing daemon listener")
+                i2pdDaemon.removeListener(listener)
+            }
+        }
+
+        // Create identity function
+        suspend fun doCreateIdentity() {
+            Log.i(TAG, ">>> doCreateIdentity() starting <<<")
+            isLoading = true
+            errorMessage = null
+            statusText = "Initializing I2P network..."
+
+            try {
+                // Step 1: Start I2P daemon
+                Log.d(TAG, "Step 1: Starting I2P daemon...")
+                val started = withContext(Dispatchers.IO) {
+                    i2pdDaemon.start()
+                }
+                Log.i(TAG, "i2pdDaemon.start() returned: $started")
+
+                if (!started) {
+                    throw IllegalStateException("Failed to start I2P daemon")
+                }
+
+                // Step 2: Wait for SAM to be ready
+                statusText = "Waiting for I2P to be ready..."
+                Log.d(TAG, "Step 2: Waiting for I2P ready...")
+                val ready = withContext(Dispatchers.IO) {
+                    i2pdDaemon.waitForReady(timeoutMs = 120000)
+                }
+                Log.i(TAG, "i2pdDaemon.waitForReady() returned: $ready")
+
+                if (!ready) {
+                    throw IllegalStateException("I2P failed to become ready")
+                }
+
+                // Step 3: Connect to SAM
+                statusText = "Creating identity..."
+                Log.d(TAG, "Step 3: Connecting to SAM...")
+                val samConnected = withContext(Dispatchers.IO) {
+                    samClient.connect()
+                }
+                Log.i(TAG, "samClient.connect() returned: $samConnected")
+
+                if (!samConnected) {
+                    throw IllegalStateException("Failed to connect to SAM")
+                }
+
+                // Step 4: Create session (this gives us the b32 address)
+                Log.d(TAG, "Step 4: Creating SAM session...")
+                val sessionResult = withContext(Dispatchers.IO) {
+                    samClient.createStreamSession()
+                }
+                Log.i(TAG, "samClient.createStreamSession() returned: ${sessionResult.isSuccess}")
+
+                if (sessionResult.isFailure) {
+                    throw IllegalStateException("Failed to create session: ${sessionResult.exceptionOrNull()?.message}")
+                }
+
+                val session = sessionResult.getOrThrow()
+                Log.i(TAG, "Session created: b32=${session.b32Address}")
+
+                // Step 5: Generate encryption keys
+                Log.d(TAG, "Step 5: Generating ECDH keys...")
+                val ecdhKeyPair = withContext(Dispatchers.IO) {
+                    CryptoManager.generateECDHKeyPair()
+                }
+                val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
+                Log.i(TAG, "ECDH keys generated")
+
+                // Step 6: Save identity
+                Log.d(TAG, "Step 6: Saving identity...")
+                withContext(Dispatchers.IO) {
+                    CryptoManager.saveKeyPair(context, session.b32Address, ecdhKeyPair)
+                    PrefsHelper.saveKeyAlias(context, session.b32Address)
+                }
+
+                val identity = ContactRepository.MyIdentity(
+                    b32Address = session.b32Address,
+                    publicKey = session.destination,
+                    privateKeyEncrypted = ecPublicB64
+                )
+                contactRepository.saveMyIdentity(identity)
+                Log.i(TAG, "Identity saved to repository")
+
+                // Step 7: Generate QR code
+                statusText = "Generating QR code..."
+                Log.d(TAG, "Step 7: Generating QR code...")
+                val qrContent = I2pQRUtils.generateQRContent(
+                    b32Address = session.b32Address,
+                    i2pDestination = session.destination,
+                    ecPublicKey = ecPublicB64
+                )
+
+                val bitmap = withContext(Dispatchers.IO) {
+                    Controller.generateQRCode(qrContent)
+                } ?: throw IllegalStateException("QR generation failed")
+                Log.i(TAG, "QR code generated")
+
+                withContext(Dispatchers.IO) {
+                    Controller.saveBitmapToInternalStorage(context, bitmap, IDENTITY_FILE_NAME)
+                    Controller.saveBitmapToGallery(context, bitmap, IDENTITY_FILE_NAME)
+                }
+                Log.i(TAG, "QR code saved")
+
+                identityBitmap = bitmap
+                myB32 = session.b32Address
+                isLoading = false
+
+                Log.i(TAG, ">>> Identity creation COMPLETE <<<")
+                Toast.makeText(context, "Identity created!", Toast.LENGTH_SHORT).show()
+
+            } catch (e: Exception) {
+                Log.e(TAG, "!!! Identity creation FAILED !!!", e)
+                errorMessage = e.message ?: "Unknown error"
+                isLoading = false
             }
         }
 
@@ -106,304 +247,135 @@ class RegistrationActivity : ComponentActivity() {
                 Text("Welcome to Anonymous!", style = MaterialTheme.typography.titleLarge)
                 Spacer(modifier = Modifier.height(16.dp))
 
-                when {
-                    isLoading -> {
-                        CircularProgressIndicator()
-                        Spacer(modifier = Modifier.height(16.dp))
+                // ── Identity ready: just show QR and continue ──────────────
+                if (identityBitmap != null) {
+                    Log.d(TAG, "UI: Showing existing identity QR")
+                    Image(
+                        bitmap = identityBitmap!!.asImageBitmap(),
+                        contentDescription = "Your Anonymous Identity QR Code",
+                        modifier = Modifier.size(256.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    myB32?.let { b32 ->
                         Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "I2P: ${i2pdDaemon.getState().name}",
+                            text = b32,
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray
-                        )
-                    }
-
-                    errorMessage != null -> {
-                        Text(
-                            text = "Error: $errorMessage",
-                            color = Color.Red,
+                            color = Color.Gray,
                             textAlign = TextAlign.Center
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(
-                            onClick = {
-                                errorMessage = null
-                                isLoading = true
-                                statusText = "Retrying..."
-                                coroutineScope.launch {
-                                    createIdentityWithRetry(
-                                        context, i2pdDaemon, samClient, contactRepository,
-                                        onStatus = { statusText = it },
-                                        onSuccess = { bmp, b32 ->
-                                            identityBitmap = bmp
-                                            myB32 = b32
-                                            isLoading = false
-                                        },
-                                        onError = { msg ->
-                                            errorMessage = msg
-                                            isLoading = false
-                                        }
-                                    )
-                                }
-                            }
-                        ) {
-                            Text("Retry")
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Button(
+                        onClick = {
+                            Log.i(TAG, "Continue button clicked, going to MainActivity")
+                            context.startActivity(Intent(context, MainActivity::class.java))
+                            finish()
+                        }
+                    ) {
+                        Icon(Icons.Default.ArrowForward, contentDescription = "Continue")
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Your Anonymous identity is ready!\nShare this QR so others can reach you.",
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        color = Color.Gray
+                    )
+
+                    // ── No identity yet: create new one ────────────────────────
+                } else {
+                    Log.d(TAG, "UI: No identity, showing creation UI")
+                    when {
+                        isLoading -> {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = statusText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        errorMessage != null -> {
+                            Text(
+                                text = "Error: $errorMessage",
+                                color = Color.Red,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                        else -> {
+                            Text(
+                                text = "Create your Anonymous identity.\nYour keys never leave this device.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                textAlign = TextAlign.Center
+                            )
                         }
                     }
 
-                    identityBitmap != null -> {
-                        // Show QR Code
-                        Image(
-                            bitmap = identityBitmap!!.asImageBitmap(),
-                            contentDescription = "Your Anonymous Identity QR Code",
-                            modifier = Modifier.size(256.dp)
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        myB32?.let { b32 ->
-                            Text(
-                                text = b32,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.Gray,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(horizontal = 24.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(24.dp))
 
-                        FloatingActionButton(
-                            onClick = {
-                                context.startActivity(Intent(context, MainActivity::class.java))
-                                finish()
-                            }
-                        ) {
-                            Icon(Icons.Default.ArrowForward, contentDescription = "Continue")
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Create new identity button
-                        Box(
-                            modifier = Modifier
-                                .padding(horizontal = 16.dp)
-                                .clip(MaterialTheme.shapes.small)
-                                .background(MaterialTheme.colorScheme.secondary)
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null
-                                ) {
-                                    coroutineScope.launch {
-                                        withContext(Dispatchers.IO) {
-                                            cleanupIdentity(context)
-                                        }
-                                        identityBitmap = null
-                                        myB32 = null
-                                        isLoading = true
-                                        statusText = "Creating new identity..."
-
-                                        createIdentityWithRetry(
-                                            context, i2pdDaemon, samClient, contactRepository,
-                                            onStatus = { statusText = it },
-                                            onSuccess = { bmp, b32 ->
-                                                identityBitmap = bmp
-                                                myB32 = b32
-                                                isLoading = false
-                                            },
-                                            onError = { msg ->
-                                                errorMessage = msg
-                                                isLoading = false
-                                            }
-                                        )
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .padding(horizontal = 16.dp)
+                            .alpha(if (isLoading) 0.6f else 1f)
+                            .clickable(
+                                enabled = !isLoading,
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() },
+                                role = Role.Button,
+                                onClick = {
+                                    Log.i(TAG, "Be Anonymous! button clicked")
+                                    scope.launch {
+                                        doCreateIdentity()
                                     }
                                 }
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                Icon(
-                                    Icons.Default.Refresh,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSecondary
+                            ),
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (isLoading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.5.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
                                 )
-                                Spacer(Modifier.width(8.dp))
+                            } else {
                                 Text(
-                                    "Create New Identity",
-                                    color = MaterialTheme.colorScheme.onSecondary
+                                    text = if (errorMessage != null) "Retry" else "Be Anonymous!",
+                                    style = MaterialTheme.typography.bodyLarge
                                 )
                             }
                         }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Your Anonymous identity is ready!\nShare this QR so others can reach you.",
-                            fontSize = 12.sp,
-                            textAlign = TextAlign.Center,
-                            color = Color.Gray
-                        )
                     }
 
-                    else -> {
-                        // Initial state - no identity
-                        Text(
-                            text = "Create your Anonymous identity.\nYour keys never leave this device.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .padding(horizontal = 16.dp)
-                                .clip(MaterialTheme.shapes.medium)
-                                .background(MaterialTheme.colorScheme.primary)
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null
-                                ) {
-                                    isLoading = true
-                                    statusText = "Starting I2P daemon..."
-                                    coroutineScope.launch {
-                                        createIdentityWithRetry(
-                                            context, i2pdDaemon, samClient, contactRepository,
-                                            onStatus = { statusText = it },
-                                            onSuccess = { bmp, b32 ->
-                                                identityBitmap = bmp
-                                                myB32 = b32
-                                                isLoading = false
-                                            },
-                                            onError = { msg ->
-                                                errorMessage = msg
-                                                isLoading = false
-                                            }
-                                        )
-                                    }
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Be Anonymous!",
-                                color = MaterialTheme.colorScheme.onPrimary
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Your private key stays on this device — it is never shared.",
-                            fontSize = 10.sp,
-                            textAlign = TextAlign.Center,
-                            color = Color.Gray
-                        )
-                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Your private key stays on this device — it is never shared.",
+                        fontSize = 10.sp,
+                        textAlign = TextAlign.Center,
+                        color = Color.Gray
+                    )
                 }
             }
-        }
-    }
-
-    private suspend fun createIdentityWithRetry(
-        context: Context,
-        i2pdDaemon: I2pdDaemon,
-        samClient: SAMClient,
-        contactRepository: ContactRepository,
-        onStatus: (String) -> Unit,
-        onSuccess: (Bitmap, String) -> Unit,
-        onError: (String) -> Unit
-    ) {
-        try {
-            // Step 1: Start daemon if not running
-            if (!i2pdDaemon.isRunning()) {
-                onStatus("Starting I2P network...")
-                val started = i2pdDaemon.start()
-                if (!started) {
-                    throw Exception("Failed to start I2P daemon")
-                }
-            }
-
-            // Step 2: Wait for SAM ready
-            onStatus("Building I2P tunnels...")
-            val ready = i2pdDaemon.waitForReady(timeoutMs = 60000)
-            if (!ready) {
-                throw Exception("I2P failed to become ready")
-            }
-
-            // Step 3: Connect SAM and create session
-            onStatus("Creating your identity...")
-
-            if (!samClient.connect()) {
-                throw Exception("Failed to connect to SAM bridge")
-            }
-
-            val sessionResult = samClient.createStreamSession()
-            if (sessionResult.isFailure) {
-                throw Exception("Failed to create I2P session: ${sessionResult.exceptionOrNull()?.message}")
-            }
-            val session = sessionResult.getOrThrow()
-
-            // Step 4: Generate encryption keys
-            onStatus("Generating encryption keys...")
-            val ecdhKeyPair = CryptoManager.generateECDHKeyPair()
-            val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
-
-            // Step 5: Save everything
-            onStatus("Saving identity...")
-            withContext(Dispatchers.IO) {
-                CryptoManager.saveKeyPair(context, session.b32Address, ecdhKeyPair)
-                PrefsHelper.saveKeyAlias(context, session.b32Address)
-            }
-
-            val identity = ContactRepository.MyIdentity(
-                b32Address = session.b32Address,
-                publicKey = session.destination,
-                privateKeyEncrypted = ecPublicB64
-            )
-            contactRepository.saveMyIdentity(identity)
-
-            // Step 6: Generate QR
-            onStatus("Generating QR code...")
-            val qrContent = I2pQRUtils.generateQRContent(
-                b32Address = session.b32Address,
-                i2pDestination = session.destination,
-                ecPublicKey = ecPublicB64
-            )
-
-            val bitmap = withContext(Dispatchers.IO) {
-                Controller.generateQRCode(qrContent)
-            } ?: throw Exception("QR generation failed")
-
-            // Save QR to storage
-            withContext(Dispatchers.IO) {
-                Controller.saveBitmapToInternalStorage(context, bitmap, IDENTITY_FILE_NAME)
-                Controller.saveBitmapToGallery(context, bitmap, IDENTITY_FILE_NAME)
-            }
-
-            withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Identity created!", Toast.LENGTH_SHORT).show()
-            }
-
-            onSuccess(bitmap, session.b32Address)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Identity creation failed", e)
-            onError(e.message ?: "Unknown error")
         }
     }
 
     private suspend fun cleanupIdentity(context: Context) {
+        Log.w(TAG, "cleanupIdentity() called - this should only happen on full app reset!")
         try {
             context.deleteFile(IDENTITY_FILE_NAME)
-
             val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
             PrefsHelper.getKeyAlias(context)?.let { alias ->
                 ks.deleteEntry(alias)
             }
-
             PrefsHelper.clearAll(context)
             ContactRepository.getInstance(context).clearIdentity()
+            Log.i(TAG, "Identity data cleaned up")
         } catch (e: Exception) {
             Log.w(TAG, "Cleanup error", e)
         }
