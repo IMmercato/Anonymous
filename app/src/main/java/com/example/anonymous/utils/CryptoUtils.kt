@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.Signature
 
 object CryptoUtils {
@@ -39,7 +40,7 @@ object CryptoUtils {
         return privateKey?.let { signData(data, it) }
     }
 
-    fun convertToSpkiFormat(publicKey: java.security.PublicKey): String {
+    fun convertToSpkiFormat(publicKey: PublicKey): String {
         return try {
             val publicKeyBytes = publicKey.encoded
             Base64.encodeToString(publicKeyBytes, Base64.NO_WRAP)
@@ -49,16 +50,16 @@ object CryptoUtils {
         }
     }
 
-    fun getPublicKeyBytes(publicKey: java.security.PublicKey): ByteArray {
+    fun getPublicKeyBytes(publicKey: PublicKey): ByteArray {
         return publicKey.encoded
     }
 
-    fun getPublicKeySpkiBase64(publicKey: java.security.PublicKey): String {
+    fun getPublicKeySpkiBase64(publicKey: PublicKey): String {
         return convertToSpkiFormat(publicKey)
     }
 
     // Utility function to extract public key from alias
-    fun getPublicKeyFromAlias(alias: String): java.security.PublicKey? {
+    fun getPublicKeyFromAlias(alias: String): PublicKey? {
         return try {
             val keyStore = KeyStore.getInstance("AndroidKeyStore")
             keyStore.load(null)
@@ -90,35 +91,6 @@ object CryptoUtils {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check if key exists", e)
             false
-        }
-    }
-    fun debugKeyStoreStatus(): Map<String, Any> {
-        return try {
-            val keyStore = KeyStore.getInstance("AndroidKeyStore")
-            keyStore.load(null)
-
-            val aliases = mutableListOf<String>()
-            val privateKeys = mutableListOf<String>()
-            val enumeration = keyStore.aliases()
-
-            while (enumeration.hasMoreElements()) {
-                val alias = enumeration.nextElement()
-                aliases.add(alias)
-
-                if (keyStore.entryInstanceOf(alias, KeyStore.PrivateKeyEntry::class.java)) {
-                    val privateKey = getPrivateKey(alias)
-                    privateKeys.add("$alias: ${privateKey != null}")
-                }
-            }
-
-            mapOf(
-                "total_aliases" to aliases.size,
-                "aliases" to aliases,
-                "private_keys" to privateKeys
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to debug KeyStore status", e)
-            emptyMap()
         }
     }
 }

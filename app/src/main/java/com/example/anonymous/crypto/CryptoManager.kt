@@ -201,30 +201,22 @@ object CryptoManager {
             return null
         }
 
-        if (privStr != null) {
-            Log.d(TAG, "Found private key for contact: $contactId (This cant be true.)")
+        val ecFactory = KeyFactory.getInstance("EC")
+
+        return if (privStr != null) {
             try {
-                val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
-                val privBytes = Base64.decode(privStr, Base64.NO_WRAP)
-                val keyFactory = KeyFactory.getInstance("RSA")
-                val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
-                val privKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privBytes))
-                return KeyPair(pubKey, privKey)
+                val pubKey = ecFactory.generatePublic(X509EncodedKeySpec(Base64.decode(pubStr, Base64.NO_WRAP)))
+                val privKey = ecFactory.generatePrivate(PKCS8EncodedKeySpec(Base64.decode(privStr, Base64.NO_WRAP)))
+                Log.d(TAG, "Loaded full EC key pair for: $contactId")
+                KeyPair(pubKey, privKey)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load key pair (pub+priv) from prefs for $contactId, this isn't an error. (the priv key of the contact is never shared)", e)
-                return null
+                Log.e(TAG, "Failed to load key pair for $contactId", e)
+                null
             }
         } else {
-            Log.d(TAG, "Found only public key for contact: $contactId in prefs.")
-            try {
-                val pubBytes = Base64.decode(pubStr, Base64.NO_WRAP)
-                val keyFactory = KeyFactory.getInstance("RSA")
-                val pubKey = keyFactory.generatePublic(X509EncodedKeySpec(pubBytes))
-                Log.w(TAG, "Only public key found for contact $contactId in prefs. This is correct.")
-                return null
-            } catch (e: Exception) {
-                return null
-            }
+            // Only public key on file — this is correct for remote contacts
+            Log.d(TAG, "Only public key on file for $contactId (correct for remote contacts)")
+            null
         }
     }
 

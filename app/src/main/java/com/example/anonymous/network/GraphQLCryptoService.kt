@@ -20,8 +20,9 @@ class GraphQLCryptoService(private val context: Context) {
     private val myUserId = PrefsHelper.getUserUuid(context) ?: throw IllegalStateException("No user ID found")
 
     companion object {
-        private const val MAX_MESSAGE_SIZE = 1024 * 4
-        private const val PADDING_BLOCK_SIZE = 256
+        private const val SMALL_MESSAGE_SIZE = 512
+        private const val MEDIUM_MESSAGE_SIZE = 2048
+        private const val LARGE_MESSAGE_SIZE = 8192
     }
 
     suspend fun sendEncryptedMessage(receiverId: String, content: String): EncryptedMessageData {
@@ -167,29 +168,27 @@ class GraphQLCryptoService(private val context: Context) {
 
     private fun addPadding(message: String): String {
         val messageBytes = message.toByteArray(Charsets.UTF_8)
+        val messageLengthWithHeader = messageBytes.size + 4
 
-        if (messageBytes.size > MAX_MESSAGE_SIZE) {
-            throw IllegalArgumentException("Message too large. Max size $MAX_MESSAGE_SIZE bytes")
+        val targetSize = when {
+            messageLengthWithHeader <= SMALL_MESSAGE_SIZE -> SMALL_MESSAGE_SIZE
+            messageLengthWithHeader <= MEDIUM_MESSAGE_SIZE -> MEDIUM_MESSAGE_SIZE
+            messageLengthWithHeader <= LARGE_MESSAGE_SIZE -> LARGE_MESSAGE_SIZE
+            else -> throw IllegalArgumentException("Message too large: ${messageBytes.size} bytes")
         }
 
-        val targetSize = ((messageBytes.size + PADDING_BLOCK_SIZE - 1) / PADDING_BLOCK_SIZE) * PADDING_BLOCK_SIZE
-
-        val paddedBytes = ByteArray(targetSize)
-
-        System.arraycopy(messageBytes, 0, paddedBytes, 0, messageBytes.size)
-
-        val random = SecureRandom()
-        for (i in messageBytes.size until targetSize) {
-            paddedBytes[i] = random.nextInt(256).toByte()
-        }
-
-        val result = ByteArray(targetSize + 4)
+        val result = ByteArray(targetSize)
         result[0] = (messageBytes.size shr 24).toByte()
         result[1] = (messageBytes.size shr 16).toByte()
         result[2] = (messageBytes.size shr 8).toByte()
         result[3] = messageBytes.size.toByte()
 
-        System.arraycopy(paddedBytes, 0, result, 4, paddedBytes.size)
+        System.arraycopy(messageBytes, 0, result, 4, messageBytes.size)
+
+        val random = SecureRandom()
+        for (i in (4 + messageBytes.size) until targetSize) {
+            result[i] = random.nextInt(256).toByte()
+        }
 
         return  Base64.encodeToString(result, Base64.NO_WRAP)
     }
@@ -197,8 +196,8 @@ class GraphQLCryptoService(private val context: Context) {
     private fun removePadding(paddedMessage: String): String {
         val decodeBytes = Base64.decode(paddedMessage, Base64.NO_WRAP)
 
-        if (decodeBytes.size < 4) {
-            throw IllegalArgumentException("Invalid padded message format")
+        if (decodeBytes.size !in listOf(SMALL_MESSAGE_SIZE, MEDIUM_MESSAGE_SIZE, LARGE_MESSAGE_SIZE)) {
+            throw IllegalArgumentException("Invalid padded message size: ${decodeBytes.size}")
         }
 
         val originalLength = ((decodeBytes[0].toInt() and 0xFF) shl 24) or
@@ -206,7 +205,7 @@ class GraphQLCryptoService(private val context: Context) {
                 ((decodeBytes[2].toInt() and 0xFF) shl 8) or
                 (decodeBytes[3].toInt() and 0xFF)
 
-        if (originalLength < 0 || originalLength > MAX_MESSAGE_SIZE) {
+        if (originalLength < 0 || originalLength > decodeBytes.size - 4) {
             throw IllegalArgumentException("Invalid original length: $originalLength")
         }
 
@@ -218,10 +217,10 @@ class GraphQLCryptoService(private val context: Context) {
 
     private suspend fun getContact(contactId: String): Contact? {
         val contacts = contactRepository.getContactsFlow().first()
-        val contact = contacts.find { it.uuid == contactId }
+        val contact = contacts.find { it.b32Address == contactId }
 
         if (contact != null) {
-            Log.d(TAG, "Found contact: ${contact.uuid}")
+            Log.d(TAG, "Found contact: ${contact.b32Address}")
             Log.d(TAG, "Contact public key length: ${contact.publicKey.length}")
         } else {
             Log.d(TAG, "Contact not found: $contactId")

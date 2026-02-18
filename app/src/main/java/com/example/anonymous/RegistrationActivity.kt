@@ -6,44 +6,29 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
-import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.view.WindowCompat
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.i2p.I2pQRUtils
@@ -61,18 +46,12 @@ class RegistrationActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "RegistrationActivity"
-        private const val KEY_ALIAS_PREFIX = "anonymous_identity_"
         private const val IDENTITY_FILE_NAME = "qr_identity.png"
-        private const val QR_FORMAT_VERSION = 1
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        )
+        enableEdgeToEdge()
 
         setContent {
             AnonymousTheme {
@@ -84,20 +63,22 @@ class RegistrationActivity : ComponentActivity() {
     @Composable
     fun RegistrationScreen() {
         val context = LocalContext.current
+
+        // Use lifecycleScope which is tied to Activity lifecycle
+        // BUT the daemon runs in its own thread so it survives config changes
         val coroutineScope = rememberCoroutineScope()
 
-        // I2P
         val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
         val samClient = remember { SAMClient.getInstance() }
         val contactRepository = remember { ContactRepository.getInstance(context) }
-        var i2pState by remember { mutableStateOf(I2pdDaemon.DaemonState.STOPPED) }
-        var statusText by remember { mutableStateOf("") }
-        var myB32 by remember { mutableStateOf<String?>(null) }
 
         var identityBitmap by remember { mutableStateOf<Bitmap?>(null) }
+        var myB32 by remember { mutableStateOf<String?>(null) }
         var isLoading by remember { mutableStateOf(false) }
+        var statusText by remember { mutableStateOf("") }
+        var errorMessage by remember { mutableStateOf<String?>(null) }
 
-        // Load and validate existing identity
+        // Check for existing identity
         LaunchedEffect(Unit) {
             val existingIdentity = contactRepository.getMyIdentity()
             if (existingIdentity != null) {
@@ -111,50 +92,6 @@ class RegistrationActivity : ComponentActivity() {
                     Controller.generateQRCode(qrContent)
                 }
             }
-        }
-
-        LaunchedEffect(isLoading) {
-            if (!isLoading) return@LaunchedEffect
-
-            i2pdDaemon.addListener(object : I2pdDaemon.DaemonStateListener {
-                override fun onStateChanged(state: I2pdDaemon.DaemonState) {
-                    i2pState = state
-                    statusText = when (state) {
-                        I2pdDaemon.DaemonState.STARTING -> "Starting I2P daemon..."
-                        I2pdDaemon.DaemonState.BUILDING_TUNNELS -> "Building tunnels..."
-                        I2pdDaemon.DaemonState.READY -> "I2P ready! Creating identity..."
-                        I2pdDaemon.DaemonState.ERROR -> "I2P error - please retry."
-                        else -> "Initialising..."
-                    }
-                    when (state) {
-                        I2pdDaemon.DaemonState.READY -> coroutineScope.launch {
-                            createIdentity(
-                                context = context,
-                                samClient = samClient,
-                                contactRepository = contactRepository,
-                                onStatus = { statusText = it },
-                                onSuccess = { bmp, b32 ->
-                                    identityBitmap = bmp
-                                    myB32 = b32
-                                    isLoading = false
-                                },
-                                onError = { msg ->
-                                    statusText = msg
-                                    isLoading = false
-                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                }
-                            )
-                        }
-                        I2pdDaemon.DaemonState.ERROR -> isLoading = false
-                        else -> {}
-                    }
-                }
-
-                override fun onError(error: String) {
-                    statusText = "Error: $error"
-                    isLoading = true
-                }
-            })
         }
 
         Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -180,13 +117,47 @@ class RegistrationActivity : ComponentActivity() {
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text  = "I2P: ${i2pState.name}",
+                            text = "I2P: ${i2pdDaemon.getState().name}",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color.Gray
                         )
                     }
 
+                    errorMessage != null -> {
+                        Text(
+                            text = "Error: $errorMessage",
+                            color = Color.Red,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                errorMessage = null
+                                isLoading = true
+                                statusText = "Retrying..."
+                                coroutineScope.launch {
+                                    createIdentityWithRetry(
+                                        context, i2pdDaemon, samClient, contactRepository,
+                                        onStatus = { statusText = it },
+                                        onSuccess = { bmp, b32 ->
+                                            identityBitmap = bmp
+                                            myB32 = b32
+                                            isLoading = false
+                                        },
+                                        onError = { msg ->
+                                            errorMessage = msg
+                                            isLoading = false
+                                        }
+                                    )
+                                }
+                            }
+                        ) {
+                            Text("Retry")
+                        }
+                    }
+
                     identityBitmap != null -> {
+                        // Show QR Code
                         Image(
                             bitmap = identityBitmap!!.asImageBitmap(),
                             contentDescription = "Your Anonymous Identity QR Code",
@@ -206,9 +177,7 @@ class RegistrationActivity : ComponentActivity() {
 
                         FloatingActionButton(
                             onClick = {
-                                context.startActivity(
-                                    Intent(context, MainActivity::class.java)
-                                )
+                                context.startActivity(Intent(context, MainActivity::class.java))
                                 finish()
                             }
                         ) {
@@ -217,29 +186,57 @@ class RegistrationActivity : ComponentActivity() {
 
                         Spacer(modifier = Modifier.height(12.dp))
 
-                        Button(
-                            onClick = {
-                                coroutineScope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        context.deleteFile(IDENTITY_FILE_NAME)
-                                        runCatching {
-                                            val ks = KeyStore.getInstance("AndroidKeyStore").also {
-                                                it.load(null)
+                        // Create new identity button
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 16.dp)
+                                .clip(MaterialTheme.shapes.small)
+                                .background(MaterialTheme.colorScheme.secondary)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) {
+                                    coroutineScope.launch {
+                                        withContext(Dispatchers.IO) {
+                                            cleanupIdentity(context)
+                                        }
+                                        identityBitmap = null
+                                        myB32 = null
+                                        isLoading = true
+                                        statusText = "Creating new identity..."
+
+                                        createIdentityWithRetry(
+                                            context, i2pdDaemon, samClient, contactRepository,
+                                            onStatus = { statusText = it },
+                                            onSuccess = { bmp, b32 ->
+                                                identityBitmap = bmp
+                                                myB32 = b32
+                                                isLoading = false
+                                            },
+                                            onError = { msg ->
+                                                errorMessage = msg
+                                                isLoading = false
                                             }
-                                            PrefsHelper.getKeyAlias(context)?.let { ks.deleteEntry(it) }
-                                        }.onFailure { Log.w(TAG, "Keystore cleanup error", it) }
+                                        )
                                     }
-                                    identityBitmap = null
-                                    myB32 = null
-                                    isLoading = true
-                                    statusText = "Starting I2P daemon..."
-                                    i2pdDaemon.start()
                                 }
-                            }
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("Create New Identity")
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSecondary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Create New Identity",
+                                    color = MaterialTheme.colorScheme.onSecondary
+                                )
+                            }
                         }
 
                         Spacer(modifier = Modifier.height(16.dp))
@@ -249,37 +246,58 @@ class RegistrationActivity : ComponentActivity() {
                             textAlign = TextAlign.Center,
                             color = Color.Gray
                         )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Keep your QR safe - it is your public reachable address.",
-                            fontSize = 10.sp,
-                            textAlign = TextAlign.Center,
-                            color = Color.Gray
-                        )
                     }
 
                     else -> {
+                        // Initial state - no identity
                         Text(
-                            text = "Create your Anonymous identity.\nYou keys never left this device.",
+                            text = "Create your Anonymous identity.\nYour keys never leave this device.",
                             style = MaterialTheme.typography.bodyMedium,
                             textAlign = TextAlign.Center
                         )
                         Spacer(modifier = Modifier.height(24.dp))
-                        Button(
-                            onClick = {
-                                isLoading = true
-                                statusText = "Stating I2P daemon..."
-                                i2pdDaemon.start()
-                            }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .padding(horizontal = 16.dp)
+                                .clip(MaterialTheme.shapes.medium)
+                                .background(MaterialTheme.colorScheme.primary)
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null
+                                ) {
+                                    isLoading = true
+                                    statusText = "Starting I2P daemon..."
+                                    coroutineScope.launch {
+                                        createIdentityWithRetry(
+                                            context, i2pdDaemon, samClient, contactRepository,
+                                            onStatus = { statusText = it },
+                                            onSuccess = { bmp, b32 ->
+                                                identityBitmap = bmp
+                                                myB32 = b32
+                                                isLoading = false
+                                            },
+                                            onError = { msg ->
+                                                errorMessage = msg
+                                                isLoading = false
+                                            }
+                                        )
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text("Be Anonymous!")
+                            Text(
+                                text = "Be Anonymous!",
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text      = "Your private key stays on this device — it is never shared.",
-                            fontSize  = 10.sp,
+                            text = "Your private key stays on this device — it is never shared.",
+                            fontSize = 10.sp,
                             textAlign = TextAlign.Center,
-                            color     = Color.Gray
+                            color = Color.Gray
                         )
                     }
                 }
@@ -287,8 +305,9 @@ class RegistrationActivity : ComponentActivity() {
         }
     }
 
-    private suspend fun createIdentity(
+    private suspend fun createIdentityWithRetry(
         context: Context,
+        i2pdDaemon: I2pdDaemon,
         samClient: SAMClient,
         contactRepository: ContactRepository,
         onStatus: (String) -> Unit,
@@ -296,23 +315,46 @@ class RegistrationActivity : ComponentActivity() {
         onError: (String) -> Unit
     ) {
         try {
-            onStatus("Connecting to SAM bridge...")
-            if (!samClient.connect()) throw Exception("Could not reach SAM bridge")
+            // Step 1: Start daemon if not running
+            if (!i2pdDaemon.isRunning()) {
+                onStatus("Starting I2P network...")
+                val started = i2pdDaemon.start()
+                if (!started) {
+                    throw Exception("Failed to start I2P daemon")
+                }
+            }
 
-            onStatus("Creating I2P destination...")
+            // Step 2: Wait for SAM ready
+            onStatus("Building I2P tunnels...")
+            val ready = i2pdDaemon.waitForReady(timeoutMs = 60000)
+            if (!ready) {
+                throw Exception("I2P failed to become ready")
+            }
+
+            // Step 3: Connect SAM and create session
+            onStatus("Creating your identity...")
+
+            if (!samClient.connect()) {
+                throw Exception("Failed to connect to SAM bridge")
+            }
+
             val sessionResult = samClient.createStreamSession()
             if (sessionResult.isFailure) {
-                throw Exception("Session error: ${sessionResult.exceptionOrNull()?.message}")
+                throw Exception("Failed to create I2P session: ${sessionResult.exceptionOrNull()?.message}")
             }
             val session = sessionResult.getOrThrow()
 
+            // Step 4: Generate encryption keys
             onStatus("Generating encryption keys...")
             val ecdhKeyPair = CryptoManager.generateECDHKeyPair()
             val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
 
+            // Step 5: Save everything
             onStatus("Saving identity...")
-            CryptoManager.saveKeyPair(context, session.b32Address, ecdhKeyPair)
-            PrefsHelper.saveKeyAlias(context, session.b32Address)
+            withContext(Dispatchers.IO) {
+                CryptoManager.saveKeyPair(context, session.b32Address, ecdhKeyPair)
+                PrefsHelper.saveKeyAlias(context, session.b32Address)
+            }
 
             val identity = ContactRepository.MyIdentity(
                 b32Address = session.b32Address,
@@ -320,25 +362,50 @@ class RegistrationActivity : ComponentActivity() {
                 privateKeyEncrypted = ecPublicB64
             )
             contactRepository.saveMyIdentity(identity)
-            
-            onStatus("Generate QR code...")
+
+            // Step 6: Generate QR
+            onStatus("Generating QR code...")
             val qrContent = I2pQRUtils.generateQRContent(
                 b32Address = session.b32Address,
                 i2pDestination = session.destination,
                 ecPublicKey = ecPublicB64
             )
-            val bitmap = withContext(Dispatchers.IO) { Controller.generateQRCode(qrContent) } ?: throw Exception("QR render failed")
-            
+
+            val bitmap = withContext(Dispatchers.IO) {
+                Controller.generateQRCode(qrContent)
+            } ?: throw Exception("QR generation failed")
+
+            // Save QR to storage
             withContext(Dispatchers.IO) {
                 Controller.saveBitmapToInternalStorage(context, bitmap, IDENTITY_FILE_NAME)
                 Controller.saveBitmapToGallery(context, bitmap, IDENTITY_FILE_NAME)
             }
 
-            Toast.makeText(context, "Identity created!", Toast.LENGTH_SHORT).show()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Identity created!", Toast.LENGTH_SHORT).show()
+            }
+
             onSuccess(bitmap, session.b32Address)
+
         } catch (e: Exception) {
             Log.e(TAG, "Identity creation failed", e)
             onError(e.message ?: "Unknown error")
+        }
+    }
+
+    private suspend fun cleanupIdentity(context: Context) {
+        try {
+            context.deleteFile(IDENTITY_FILE_NAME)
+
+            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            PrefsHelper.getKeyAlias(context)?.let { alias ->
+                ks.deleteEntry(alias)
+            }
+
+            PrefsHelper.clearAll(context)
+            ContactRepository.getInstance(context).clearIdentity()
+        } catch (e: Exception) {
+            Log.w(TAG, "Cleanup error", e)
         }
     }
 }

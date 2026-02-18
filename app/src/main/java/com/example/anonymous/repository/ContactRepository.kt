@@ -21,6 +21,19 @@ import java.net.URI
 val Context.contactsDataStore: DataStore<Preferences> by preferencesDataStore(name = "contacts")
 
 class ContactRepository(private val context: Context) {
+    companion object {
+        @Volatile
+        private var instance: ContactRepository? = null
+
+        fun getInstance(context: Context): ContactRepository {
+            return instance ?: synchronized(this) {
+                instance ?: ContactRepository(context.applicationContext).also {
+                    instance = it
+                }
+            }
+        }
+    }
+
     private val CONTACTS_KEY = stringPreferencesKey("contacts_list")
     private val MY_IDENTITY_KEY = stringPreferencesKey("my_identity")
     private val json = Json { encodeDefaults = true }
@@ -134,17 +147,25 @@ class ContactRepository(private val context: Context) {
         return getAllContacts().filter { it.isVerified }
     }
 
-    suspend fun getMyIdentity(): MyIdentity? {
-        return context.contactsDataStore.data.map { preferences ->
-            preferences[MY_IDENTITY_KEY]?.let { jsonString->
-                json.decodeFromString<MyIdentity>(jsonString)
-            }
-        }.first()
+    fun getMyIdentity(): MyIdentity? {
+        return runBlocking {
+            context.contactsDataStore.data.map { preferences ->
+                preferences[MY_IDENTITY_KEY]?.let { jsonString ->
+                    json.decodeFromString<MyIdentity>(jsonString)
+                }
+            }.first()
+        }
     }
 
     suspend fun saveMyIdentity(identity: MyIdentity) {
         context.contactsDataStore.edit { preferences ->
             preferences[MY_IDENTITY_KEY] = json.encodeToString(identity)
+        }
+    }
+
+    suspend fun clearIdentity() {
+        context.contactsDataStore.edit { preferences ->
+            preferences.remove(MY_IDENTITY_KEY)
         }
     }
 

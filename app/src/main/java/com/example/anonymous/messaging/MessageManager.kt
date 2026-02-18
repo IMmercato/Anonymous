@@ -157,6 +157,30 @@ class MessageManager private constructor(context: Context) {
         }
     }
 
+    fun startListening(sessionId: String) {
+        this.serverSessionId = sessionId
+
+        scope.launch {
+            Log.i(TAG, "Starting to listen for incoming I2P connections on session: $sessionId")
+
+            while (isActive) {
+                try {
+                    val result = samClient.acceptConnection(sessionId)
+                    if (result.isSuccess) {
+                        val (socket, peerDest) = result.getOrThrow()
+                        Log.i(TAG, "Accepted incoming connection from: $peerDest")
+                        handleIncomingConnection(socket, peerDest)
+                    }
+                } catch (e: Exception) {
+                    if (e !is CancellationException) {
+                        Log.e(TAG, "Error accepting connection", e)
+                        delay(1000)
+                    }
+                }
+            }
+        }
+    }
+
     suspend fun sendMessage(contactB32: String, text: String, replyToId: String? = null): Result<Message> {
         return try {
             val messageId = UUID.randomUUID().toString()
@@ -482,7 +506,7 @@ class MessageManager private constructor(context: Context) {
     /**
      * Send Read Receipt
      */
-    private suspend fun sendReadReceipt(contactB32: String, messageId: String) {
+    private fun sendReadReceipt(contactB32: String, messageId: String) {
         try {
             val connection = activeConnections[contactB32] ?: return
             val myB32 = getMyB32Address() ?: return
@@ -503,16 +527,6 @@ class MessageManager private constructor(context: Context) {
             Log.d(TAG, "Sent read receipt for $messageId to $contactB32")
         } catch (e: Exception) {
             Log.w(TAG, "Failed too send read receipt", e)
-        }
-    }
-
-    private fun closeConnection(connection: PeerConnection) {
-        try {
-            connection.writer.close()
-            connection.reader.close()
-            connection.socket.close()
-        } catch (e: Exception) {
-
         }
     }
 
@@ -558,7 +572,8 @@ class MessageManager private constructor(context: Context) {
     }
 
     private fun getMyKeyPair(): KeyPair? {
-        return cryptoManager.getUserKeyPair(context)
+        val myUserId = contactRepository.getMyIdentity()?.b32Address ?: return null
+        return cryptoManager.getKeyPair(context, myUserId, isOwnKey = true)
     }
 
     private fun decodeECPublicKey(bytes: ByteArray): PublicKey {
@@ -573,10 +588,26 @@ class MessageManager private constructor(context: Context) {
         return salt
     }
 
+    private val connectionLock = Any()
+
+    private fun closeConnection(connection: PeerConnection) {
+        synchronized(connectionLock) {
+            try {
+                connection.writer.close()
+                connection.reader.close()
+                connection.socket.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing connection", e)
+            }
+        }
+    }
+
     fun cleanup() {
         scope.cancel()
-        activeConnections.values.forEach { closeConnection(it) }
-        activeConnections.clear()
+        synchronized(connectionLock) {
+            activeConnections.values.forEach { closeConnection(it) }
+            activeConnections.clear()
+        }
         samClient.disconnect()
         Log.i(TAG, "MessageManager cleaned up")
     }

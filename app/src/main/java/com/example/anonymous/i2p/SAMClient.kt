@@ -235,7 +235,7 @@ class SAMClient private constructor() {
             // HELLO
             writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
             val helloResp = reader.readLine()
-            if (!helloResp.startsWith("HELLO REPLY RESULT=OJ")) {
+            if (!helloResp.startsWith("HELLO REPLY RESULT=OK")) {
                 acceptSocket.close()
                 return@withContext Result.failure(Exception("HELLO failed"))
             }
@@ -391,7 +391,7 @@ class SAMClient private constructor() {
     }
 
     private fun extractValue(response: String, key: String): String? {
-        val regex = "$key=([^\s]+)".toRegex()
+        val regex = "$key=(\\S+)".toRegex()
         return regex.find(response)?.groupValues?.get(1)
     }
 

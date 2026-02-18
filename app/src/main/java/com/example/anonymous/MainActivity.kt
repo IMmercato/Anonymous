@@ -2,11 +2,13 @@ package com.example.anonymous
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.RequiresApi
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -14,6 +16,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -36,18 +40,36 @@ import com.example.anonymous.messaging.MessageManager
 import com.example.anonymous.network.model.Contact
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.ui.theme.AnonymousTheme
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        window.isFrameRatePowerSavingsBalanced = false
+
         enableEdgeToEdge()
         setContent {
             AnonymousTheme {
                 MainScreen()
             }
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+
+        if (isFinishing) {
+            Log.i("MainActivity", "Activity finishing")
+            Thread {
+                try {
+                    I2pdDaemon.getExistingInstance()?.cleanup()
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Cleanup error", e)
+                }
+            }.start()
         }
     }
 }
@@ -94,62 +116,34 @@ fun MainScreen() {
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
     var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
 
-    // Initialize I2P
+    // Initialize I2P only if identity exists
     LaunchedEffect(Unit) {
         identityBitmap = Controller.checkIdentityExists(context, identityFileName)
         isIdentityChecked = true
 
-        if (identityBitmap != null) {
+        if (identityBitmap != null && !i2pdDaemon.isRunning()) {
             showI2PInitializing = true
 
-            i2pdDaemon.addListener(object : I2pdDaemon.DaemonStateListener {
-                override fun onStateChanged(state: I2pdDaemon.DaemonState) {
-                    coroutineScope.launch(Dispatchers.Main) {
-                        i2pState = state
-                        when (state) {
-                            I2pdDaemon.DaemonState.READY -> {
-                                coroutineScope.launch {
-                                    // Initialize SAM and MessageManger
-                                    val samConnected = samClient.connect()
-                                    if (samConnected) {
-                                        val sessionResult = samClient.createStreamSession()
-                                        if (sessionResult.isSuccess) {
-                                            val session = sessionResult.getOrThrow()
+            // Start daemon
+            i2pdDaemon.start()
 
-                                            val existingIdentity = contactRepository.getMyIdentity()
-                                            if (existingIdentity == null) {
-                                                val identity = ContactRepository.MyIdentity(
-                                                    b32Address = session.b32Address,
-                                                    publicKey = session.destination,
-                                                    privateKeyEncrypted = ""
-                                                )
-                                                contactRepository.saveMyIdentity(identity)
-                                            }
+            // Wait for ready
+            val ready = i2pdDaemon.waitForReady()
 
-                                            val msgInitSuccess = messageManager.initialize()
-                                            isI2PReady = msgInitSuccess
-                                            if (msgInitSuccess) {
-                                                messageManager.startListening(session.id)
-                                            }
-                                        }
-                                    }
-                                    showI2PInitializing = false
-                                }
-                            }
-                            I2pdDaemon.DaemonState.ERROR -> {
-                                showI2PInitializing = false
-                            }
-                            else -> {}
-                        }
+            if (ready) {
+                // Initialize SAM and MessageManager
+                val samConnected = samClient.connect()
+                if (samConnected) {
+                    val msgInitSuccess = messageManager.initialize()
+                    isI2PReady = msgInitSuccess
+                    if (msgInitSuccess) {
+                        val session = samClient.getActiveSessions().firstOrNull()
+                        session?.let { messageManager.startListening(it.id) }
                     }
                 }
+            }
 
-                override fun onError(error: String) {
-                    showI2PInitializing = false
-                }
-            })
-
-            i2pdDaemon.start()
+            showI2PInitializing = false
         }
     }
 
@@ -332,14 +326,24 @@ fun Welcome() {
     var showText by remember { mutableStateOf(false) }
     var showButton by remember { mutableStateOf(false) }
 
+    var isActive by remember { mutableStateOf(true) }
+
+    DisposableEffect(Unit) {
+        onDispose { isActive = false }
+    }
+
     LaunchedEffect(Unit) {
         delay(1500)
+        if (!isActive) return@LaunchedEffect
         showLogo = false
         delay(1000)
+        if (!isActive) return@LaunchedEffect
         showSlogan = true
         delay(500)
+        if (!isActive) return@LaunchedEffect
         showText = true
         delay(1000)
+        if (!isActive) return@LaunchedEffect
         showButton = true
     }
 
@@ -400,12 +404,22 @@ fun Welcome() {
                     bottom = 16.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
                 )
         ) {
-            Button(onClick = {
-                context.startActivity(Intent(context, RegistrationActivity::class.java))
-            }) {
-                Icon(imageVector = Icons.Default.PlayArrow, contentDescription = "Register")
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Register")
+            Box(
+                modifier = Modifier
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        context.startActivity(Intent(context, RegistrationActivity::class.java))
+                    }
+                    .padding(horizontal = 32.dp, vertical = 16.dp)
+                    .background(MaterialTheme.colorScheme.primary, shape = MaterialTheme.shapes.medium)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Register")
+                }
             }
         }
     }

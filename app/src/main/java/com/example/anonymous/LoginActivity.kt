@@ -434,9 +434,6 @@ private fun startLoginProcess(
 ) {
     onStateChange(LoginState.Loading("Verifying JWT..."))
 
-    // DEBUG: Full key status check
-    debugFullKeyStatus(context)
-
     coroutineScope.launch {
         try {
             // Step 1: Request nonce from server
@@ -493,40 +490,10 @@ private fun startLoginProcess(
 
         } catch (e: Exception) {
             Log.e("LoginActivity", "Verification failed", e)
-            // DEBUG: Check key status after failure
-            debugFullKeyStatus(context)
-            val isRecoverable = !e.message?.contains("register again", ignoreCase = true)!! ?: true
+            val isRecoverable = !(e.message?.contains("register again", ignoreCase = true) ?: true)
             onStateChange(LoginState.Error(e.message ?: "Unknown error during verification", isRecoverable))
         }
     }
-}
-
-// Debugger
-private fun debugFullKeyStatus(context: Context) {
-    val prefs = PrefsHelper.getSecurePrefs(context)
-
-    Log.d("LoginActivity", "=== FULL KEY STATUS DEBUG ===")
-    Log.d("LoginActivity", "All preferences keys: ${prefs.all.keys}")
-
-    val keyAlias = prefs.getString("key_alias", null)
-    Log.d("LoginActivity", "Key alias in prefs: $keyAlias")
-
-    // Debug Android KeyStore directly
-    val keyStoreStatus = CryptoUtils.debugKeyStoreStatus()
-    Log.d("LoginActivity", "KeyStore status: $keyStoreStatus")
-
-    if (keyAlias != null) {
-        val keyExists = CryptoUtils.doesKeyExist(keyAlias)
-        Log.d("LoginActivity", "Key exists in AndroidKeyStore: $keyExists")
-
-        if (keyExists) {
-            val privateKey = CryptoUtils.getPrivateKey(keyAlias)
-            Log.d("LoginActivity", "Private key retrievable: ${privateKey != null}")
-        }
-    } else {
-        Log.e("LoginActivity", "CRITICAL: No key alias found in preferences!")
-    }
-    Log.d("LoginActivity", "=== END FULL DEBUG ===")
 }
 
 private suspend fun requestNonceFromServer(context: Context, jwt: String): String {

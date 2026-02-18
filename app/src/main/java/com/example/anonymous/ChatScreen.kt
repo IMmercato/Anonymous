@@ -1,6 +1,7 @@
 package com.example.anonymous
 
 import android.util.Log
+import android.widget.Toast
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -62,13 +63,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.datastore.preferences.core.Preferences
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.i2p.I2pdDaemon
 import com.example.anonymous.messaging.MessageManager
-import com.example.anonymous.network.ConnectionStatus
 import com.example.anonymous.network.GraphQLCryptoService
-import com.example.anonymous.network.GraphQLMessageService
 import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.repository.MessageRepository
@@ -78,6 +76,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.runtime.collectAsState
+import com.example.anonymous.messaging.OfflineMessageManager
 
 sealed class IconType(val action: (String) -> String) {
     data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
@@ -95,6 +94,7 @@ fun ChatScreen(
     val context = LocalContext.current
     val messageRepository = remember { MessageRepository(context) }
     val messageManager = remember { MessageManager.getInstance(context) }
+    val offlineManager = remember { OfflineMessageManager.getInstance(context) }
     val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
     val contactRepository = remember { ContactRepository.getInstance(context) }
 
@@ -345,8 +345,11 @@ fun ChatScreen(
                                                 Log.d("ChatScreen", "Message sent successfully via I2P")
                                             } else {
                                                 Log.w("ChatScreen", "I2P sen failed, queuing for offline: ${result.exceptionOrNull()?.message}")
-                                                // Offline Handler & UI updates
+                                                val queuedId = offlineManager.queueMessage(contactId, message)
+                                                Log.d("ChatScreen", "Message queued for offline delivery: $queuedId")
+                                                message = ""
                                                 isCodeFormat = false
+                                                Toast.makeText(context, "Message Queued", Toast.LENGTH_SHORT).show()
                                             }
                                         } catch (e: Exception) {
                                             Log.e("ChatScreen", "Error sending message", e)

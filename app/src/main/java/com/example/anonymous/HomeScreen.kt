@@ -132,7 +132,7 @@ fun HomeScreen(
                 TextButton(
                     onClick = {
                         coroutineScope.launch {
-                            contactRepository.deleteContact(currentContact!!.uuid)
+                            contactRepository.deleteContact(currentContact!!.b32Address)
                         }
                         showDeleteDialog = false
                     }

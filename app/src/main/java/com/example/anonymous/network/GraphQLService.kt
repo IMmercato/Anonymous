@@ -1,10 +1,17 @@
 package com.example.anonymous.network
 
 import android.content.Context
+import android.util.Log
 import com.example.anonymous.network.model.*
 import com.example.anonymous.utils.PrefsHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
@@ -98,6 +105,32 @@ interface GraphQLService {
                 .addConverterFactory(GsonConverterFactory.create())
                 .build()
                 .create(GraphQLService::class.java)
+        }
+    }
+
+    suspend fun checkWebSocketSupport(): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val okHttpClient = OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .build()
+
+                val request = Request.Builder()
+                    .url("wss://immercato.hackclub.app/graphql")
+                    .build()
+
+                val webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+                    override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                        webSocket.close(1000, "Test complete")
+                    }
+                })
+
+                delay(2000) // Wait for connection
+                true
+            } catch (e: Exception) {
+                Log.e("WebSocketCheck", "WebSocket not supported", e)
+                false
+            }
         }
     }
 }

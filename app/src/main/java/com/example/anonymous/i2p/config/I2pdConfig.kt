@@ -5,9 +5,6 @@ import java.io.File
 
 object I2pdConfig {
 
-    /**
-    * Generate Client-Only i2pd.conf
-    */
     fun generateConfig(context: Context): String {
         val dataDir = File(context.filesDir, "i2pd")
 
@@ -29,19 +26,13 @@ object I2pdConfig {
             ## Network id
             netid = 2
             
-            ## Service configuration
-            [http]
-            enabled = true
-            address = 127.0.0.1
-            port = 7070
-            
-            ## SAM
+            ## SAM bridge
             [sam]
             enabled = true
             address = 127.0.0.1
             port = 7656
-            portudp = 7656
-            singlethread = false
+            portudp = 7655
+            singlethread = true
             
             ## Disable transit tunnels (client-only mode)
             notransit = true
@@ -50,61 +41,51 @@ object I2pdConfig {
             floodfill = false
             
             ## Bandwidth limits
-            bandwidth = L       # L = Limited, 0 = Unlimited
+            bandwidth = L
             share = 0
             
-            ## Transit tunnel limits
+            ## Transit tunnel limits - minimized threads
             [limits]
             transittunnels = 0
             coresize = 1
-            openfiles = 256
-            ntcphard = 64
-            ntcpsoft = 16
+            openfiles = 128
+            ntcphard = 32
+            ntcpsoft = 8
             ntcphreads = 1
             
             ## Network Protocols
             ipv4 = true
-            ipv6 = true
+            ipv6 = false
             
-            ## SSU (UDP transport)
-            ssu = true
-            ssu.enabled = true
+            ## SSU2 (UDP transport)
+            [ssu2]
+            enabled = true
+            published = false
             
-            ## NTCP (TCP transport)
-            ntcp = false
+            ## NTCP2 (TCP transport)
+            [ntcp2]
+            enabled = true
+            published = false
+            port = 0
             
-            ## NTCP2 (moder TCP transport)
-            ntcp2.enabled = true
-            ntcp2.published = false
-            ntcp2.port = 0
-            
-            ## Exploratory Tunnels
+            ## Exploratory Tunnels - reduced for mobile
             [exploratory]
             inbound.length = 2
             inbound.quantity = 2
             outbound.length = 2
             outbound.quantity = 2
             
-            ## Tunnel settings
-            [tunnels]
             ## Crypto
-            crypto.tagtimeout = 2400
+            [crypto]
+            tagtimeout = 2400
             
             ## HTTP Console
             [http]
-            enabled = true      # DEBUG
-            address = 127.0.0.1
-            port = 7070
-            auth = true
-            user = admin
-            pass =
-            stricthreaders = true
-            hostname = localhost
-            webroot = /
+            enabled = false
             
-            ## Reseed
+            ## Reseed - disabled verify for faster startup
             [reseed]
-            verify = true
+            verify = false
             threshold = 25
             urls = https://reseed.i2p-projekt.de/,https://i2p.mooo.com/netDb/,https://reseed.memcpy.io/,https://reseed-fr.i2pd.xyz/,https://reseed.onion.im/
             
@@ -113,10 +94,9 @@ object I2pdConfig {
             defaulturl = http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt
             subscription = http://stats.i2p/cgi-bin/newhosts.txt,http://i2p-projekt.i2p/hosts.txt
             
-            ## UPNP
+            ## UPnP
             [upnp]
-            enabled = true
-            name = I2Pd
+            enabled = false
             
             ## Disabled Services
             [httpproxy]
@@ -136,14 +116,14 @@ object I2pdConfig {
             
             ## Precomputation
             [precomputation]
-            elgamal = true
+            elgamal = false
             
-            ## Performance & Persistence
+            ## Persistence
             [persist]
-            profiles = true
+            profiles = false
             
-            ## CPU
-            cpuext = true
+            ## CPU extensions - disabled for stability
+            cpuext = false
             
             ## Trust
             [trust]
@@ -154,12 +134,16 @@ object I2pdConfig {
     }
 
     fun writeConfig(context: Context): File {
-        val configDir = File(context.filesDir, "i2pd")
-        if (!configDir.exists()) {
-            configDir.mkdirs()
+        val dataDir = File(context.filesDir, "i2pd")
+        if (!dataDir.exists()) {
+            dataDir.mkdirs()
         }
 
-        val configFile = File(configDir, "i2pd.conf")
+        listOf("netDb", "addressbook", "certificates", "tunnels.d").forEach {
+            File(dataDir, it).mkdirs()
+        }
+
+        val configFile = File(dataDir, "i2pd.conf")
         configFile.writeText(generateConfig(context))
 
         return configFile
