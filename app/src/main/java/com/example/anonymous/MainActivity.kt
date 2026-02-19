@@ -60,14 +60,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        super.onStop()
+        Log.i("MainActivity", "onStop - NOT stopping I2P")
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        Log.i("MainActivity", "onDestroy called, isFinishing=$isFinishing")
-
-        if (isFinishing) {
-            Log.i("MainActivity", "Activity finishing - BUT NOT STOPPING I2P!")
-            Log.i("MainActivity", "I2P daemon keeps running for the entire app process")
-        }
+        Log.i("MainActivity", "onDestroy - NOT stopping I2P")
     }
 }
 
