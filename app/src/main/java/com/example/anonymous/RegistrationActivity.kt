@@ -1,13 +1,7 @@
 package com.example.anonymous
 
-import android.content.Intent
-import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -26,48 +20,36 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
 import com.example.anonymous.i2p.I2pdDaemon
-import com.example.anonymous.ui.theme.AnonymousTheme
+import com.example.anonymous.i2p.I2pdJNI
 
-class RegistrationActivity : ComponentActivity() {
-
-    companion object {
-        private const val TAG = "RegistrationActivity"
-    }
-
-    // viewModels() delegate survives rotation and is only cleared when the
-    // Activity is truly finished — so viewModelScope outlives any recomposition.
-    private val viewModel: RegistrationViewModel by viewModels()
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        Log.i(TAG, "onCreate")
-        super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        setContent {
-            AnonymousTheme {
-                RegistrationScreen(viewModel)
-            }
-        }
-    }
-
-    override fun onDestroy() {
-        Log.i(TAG, "onDestroy")
-        super.onDestroy()
-    }
-}
+private const val TAG = "RegistrationScreen"
 
 @Composable
-private fun RegistrationScreen(viewModel: RegistrationViewModel) {
+fun RegistrationScreen(
+    navController: NavHostController,
+    viewModel: RegistrationViewModel = viewModel()
+) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
 
-    // Load any pre-existing identity once, without a coroutine scope
+    LaunchedEffect(Unit) {
+        try {
+            val abi = I2pdJNI.getABICompiledWith()
+            Log.i("TEST", "Native ABI: $abi")
+        } catch (e: Exception) {
+            Log.e("TEST", "Native load failed!", e)
+        }
+    }
+
+    // Load any pre-existing identity once
     LaunchedEffect(Unit) {
         viewModel.loadExistingIdentityIfAny(context)
     }
 
-    // Wire the daemon state listener — removed when the composable leaves composition,
-    // but that's fine: it only updates statusText, the real work lives in viewModelScope.
+    // Wire the daemon state listener
     val daemon = remember { I2pdDaemon.getInstance(context) }
     DisposableEffect(daemon) {
         val listener = object : I2pdDaemon.DaemonStateListener {
@@ -82,10 +64,14 @@ private fun RegistrationScreen(viewModel: RegistrationViewModel) {
         onDispose { daemon.removeListener(listener) }
     }
 
-    // Show toast when identity becomes ready
+    // Navigate to main when identity becomes ready
     LaunchedEffect(uiState.isIdentityReady) {
         if (uiState.isIdentityReady) {
             Toast.makeText(context, "Identity created!", Toast.LENGTH_SHORT).show()
+            // CRITICAL: Navigate to main WITHOUT killing this composable's process
+            navController.navigate("main") {
+                popUpTo("registration") { inclusive = true }
+            }
         }
     }
 
@@ -102,7 +88,7 @@ private fun RegistrationScreen(viewModel: RegistrationViewModel) {
             Spacer(modifier = Modifier.height(16.dp))
 
             if (uiState.isIdentityReady && uiState.identityBitmap != null) {
-                // ── Identity ready — show QR ──────────────────────────────────
+                // Identity ready - show QR
                 Image(
                     bitmap = uiState.identityBitmap!!.asImageBitmap(),
                     contentDescription = "Your Anonymous Identity QR Code",
@@ -119,10 +105,13 @@ private fun RegistrationScreen(viewModel: RegistrationViewModel) {
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(onClick = {
-                    context.startActivity(Intent(context, MainActivity::class.java))
-                    (context as? RegistrationActivity)?.finish()
+                    navController.navigate("main") {
+                        popUpTo("registration") { inclusive = true }
+                    }
                 }) {
                     Icon(Icons.Default.ArrowForward, contentDescription = "Continue")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Continue")
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -133,7 +122,7 @@ private fun RegistrationScreen(viewModel: RegistrationViewModel) {
                 )
 
             } else {
-                // ── Creation UI ───────────────────────────────────────────────
+                // Creation UI
                 when {
                     uiState.isLoading -> {
                         CircularProgressIndicator()
@@ -174,8 +163,7 @@ private fun RegistrationScreen(viewModel: RegistrationViewModel) {
                             interactionSource = remember { MutableInteractionSource() },
                             role = Role.Button,
                             onClick = {
-                                Log.i("RegistrationActivity", "Be Anonymous! clicked")
-                                // No scope.launch() needed — ViewModel handles it
+                                Log.i(TAG, "Be Anonymous! clicked")
                                 viewModel.createIdentity(context)
                             }
                         ),
