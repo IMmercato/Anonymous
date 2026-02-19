@@ -1,7 +1,5 @@
 package com.example.anonymous
 
-import android.content.Intent
-import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -29,6 +27,10 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.datastore.CommunityCustomizationSettings
@@ -55,7 +57,19 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             AnonymousTheme {
-                MainScreen()
+                val navController = rememberNavController()
+
+                NavHost(navController = navController, startDestination = "splash") {
+                    composable("splash") {
+                        SplashScreen(navController)
+                    }
+                    composable("registration") {
+                        RegistrationScreen(navController)
+                    }
+                    composable("main") {
+                        MainScreen(navController)
+                    }
+                }
             }
         }
     }
@@ -71,314 +85,49 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen() {
+fun SplashScreen(navController: NavHostController) {
     val context = LocalContext.current
-
-    // Retrieve customization settings from DataStore
-    val chatSettingsFlow = getChatCustomizationSettings(context)
-    val chatCustomizationSettings by chatSettingsFlow.collectAsState(
-        initial = ChatCustomizationSettings()
-    )
-    val communitySettingsFlow = getCommunityCustomizationSettings(context)
-    val communityCustomizationSettings by communitySettingsFlow.collectAsState(
-        initial = CommunityCustomizationSettings()
-    )
-
-    val selectedTab = remember { mutableStateOf(Icons.Default.Home) }
-    var showCustomHome by remember { mutableStateOf(false) }
-    var accountIcon by remember { mutableStateOf(Icons.Default.Person) }
-    var iconScale by remember { mutableStateOf(1f) }
-    val animatedIconScale by animateFloatAsState(targetValue = iconScale)
-    val coroutineScope = rememberCoroutineScope()
-    var showingAuthor by remember { mutableStateOf(false) }
-
-    // I2P State
-    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
-    val samClient = remember { SAMClient.getInstance() }
-    val messageManager = remember { MessageManager.getInstance(context) }
-    val contactRepository = remember { ContactRepository.getInstance(context) }
-
-    var i2pState by remember { mutableStateOf(I2pdDaemon.DaemonState.STOPPED) }
-    var isI2PReady by remember { mutableStateOf(false) }
-    var showI2PInitializing by remember { mutableStateOf(false) }
-
-    // Identity check
-    val identityFileName = "qr_identity.png"
-    var identityBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var isIdentityChecked by remember { mutableStateOf(false) }
-
-    // State for navigation
-    var selectedContact by remember { mutableStateOf<Contact?>(null) }
-    var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
-
-    // Initialize I2P only if identity exists
-    LaunchedEffect(Unit) {
-        Log.i("MainActivity", "LaunchedEffect: Checking identity...")
-        identityBitmap = Controller.checkIdentityExists(context, identityFileName)
-        isIdentityChecked = true
-        Log.i("MainActivity", "Identity exists: ${identityBitmap != null}")
-
-        if (identityBitmap != null) {
-            if (!i2pdDaemon.isRunning()) {
-                Log.i("MainActivity", "I2P not running, starting...")
-                showI2PInitializing = true
-
-                // Start daemon
-                val started = withContext(Dispatchers.IO) { i2pdDaemon.start() }
-                Log.i("MainActivity", "i2pdDaemon.start() returned: $started")
-
-                if (started) {
-                    // Wait for ready
-                    Log.i("MainActivity", "Waiting for I2P ready...")
-                    val ready = withContext(Dispatchers.IO) { i2pdDaemon.waitForReady() }
-                    Log.i("MainActivity", "i2pdDaemon.waitForReady() returned: $ready")
-
-                    if (ready) {
-                        // Initialize SAM and MessageManager
-                        Log.i("MainActivity", "Connecting to SAM...")
-                        val samConnected = samClient.connect()
-                        Log.i("MainActivity", "samClient.connect() returned: $samConnected")
-
-                        if (samConnected) {
-                            Log.i("MainActivity", "Initializing MessageManager...")
-                            val msgInitSuccess = messageManager.initialize()
-                            Log.i("MainActivity", "messageManager.initialize() returned: $msgInitSuccess")
-                            isI2PReady = msgInitSuccess
-                            if (msgInitSuccess) {
-                                val session = samClient.getActiveSessions().firstOrNull()
-                                Log.i("MainActivity", "Active SAM sessions: ${samClient.getActiveSessions().size}")
-                                session?.let {
-                                    Log.i("MainActivity", "Starting to listen on session: ${it.id}")
-                                    messageManager.startListening(it.id)
-                                }
-                            }
-                        } else {
-                            Log.e("MainActivity", "SAM connection failed!")
-                        }
-                    } else {
-                        Log.e("MainActivity", "I2P failed to become ready!")
-                    }
-                } else {
-                    Log.e("MainActivity", "i2pdDaemon.start() failed!")
-                }
-
-                showI2PInitializing = false
-            } else {
-                Log.i("MainActivity", "I2P already running, reusing existing daemon")
-                isI2PReady = true
-                val msgInitSuccess = messageManager.initialize()
-                if (msgInitSuccess) {
-                    val session = samClient.getActiveSessions().firstOrNull()
-                    session?.let {
-                        messageManager.startListening(it.id)
-                    }
-                }
-            }
-        } else {
-            Log.i("MainActivity", "No identity found, redirecting to registration")
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            Log.d("MainActivity", "MainActivity disposed but I2P keeps running")
-        }
-    }
-
-    if (!isIdentityChecked || showI2PInitializing) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator()
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = if (!isIdentityChecked) "Checking identity..." else "Initializing I2P network...",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                if (showI2PInitializing) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "State: ${i2pState.name}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray
-                    )
-                }
-            }
-        }
-    } else {
-        if (identityBitmap != null) {
-            // User is logged in
-            if (selectedCommunity != null) {
-                CommunityScreen(
-                    community = selectedCommunity!!,
-                    onBack = { selectedCommunity = null },
-                    customization = communityCustomizationSettings
-                )
-            } else if (selectedContact != null) {
-                ChatScreen(
-                    contactId = selectedContact!!.b32Address,
-                    contactName = selectedContact!!.name,
-                    customizationSettings = chatCustomizationSettings,
-                    onBack = { selectedContact = null }
-                )
-            } else {
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    topBar = {
-                        TopAppBar(
-                            title = { Text("Anonymous") },
-                            actions = {
-                                IconButton(onClick = {
-                                    iconScale = 1.2f
-                                    coroutineScope.launch {
-                                        delay(200)
-                                        iconScale = 1f
-                                    }
-                                    if (accountIcon == Icons.Default.Person) {
-                                        showCustomHome = true
-                                        accountIcon = Icons.Default.Face
-                                    } else {
-                                        showCustomHome = false
-                                        accountIcon = Icons.Default.Person
-                                    }
-                                }) {
-                                    Icon(
-                                        imageVector = accountIcon,
-                                        contentDescription = "Account",
-                                        modifier = Modifier.scale(animatedIconScale)
-                                    )
-                                }
-                            }
-                        )
-                    },
-                    bottomBar = {
-                        BottomAppBar {
-                            IconButton(
-                                onClick = { selectedTab.value = Icons.Default.Home },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.Home,
-                                    contentDescription = "Home",
-                                    modifier = Modifier.size(26.dp),
-                                    tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray
-                                )
-                            }
-                            IconButton(
-                                onClick = { selectedTab.value = Icons.Default.Search },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = "Search",
-                                    modifier = Modifier.size(26.dp),
-                                    tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray
-                                )
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(16.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                IconButton(onClick = { selectedTab.value = Icons.Default.Add }) {
-                                    Icon(
-                                        Icons.Default.Add,
-                                        contentDescription = "Add",
-                                        tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray
-                                    )
-                                }
-                            }
-                            IconButton(
-                                onClick = { selectedTab.value = Icons.Default.PlayArrow },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.PlayArrow,
-                                    contentDescription = "User",
-                                    modifier = Modifier.size(26.dp),
-                                    tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray
-                                )
-                            }
-                            IconButton(
-                                onClick = { selectedTab.value = Icons.Default.Person },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(
-                                    Icons.Default.Person,
-                                    contentDescription = "Settings",
-                                    modifier = Modifier.size(26.dp),
-                                    tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray
-                                )
-                            }
-                        }
-                    }
-                ) { innerPadding ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        when (selectedTab.value) {
-                            Icons.Default.Home -> HomeScreen(
-                                isCommunity = showCustomHome,
-                                onOpenChat = { contact -> selectedContact = contact },
-                                onOpenCommunity = { community -> selectedCommunity = community }
-                            )
-                            Icons.Default.Search -> SearchScreen()
-                            Icons.Default.Add -> PubblicScreen()
-                            Icons.Default.PlayArrow -> {
-                                if (showingAuthor) {
-                                    AuthorScreen(onBack = { showingAuthor = false })
-                                } else {
-                                    XScreen(onSwipeRight = { showingAuthor = true })
-                                }
-                            }
-                            Icons.Default.Person -> SettingsScreen()
-                        }
-                    }
-                }
-            }
-        } else {
-            Welcome()
-        }
-    }
-}
-
-@Composable
-fun Welcome() {
-    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     var showLogo by remember { mutableStateOf(true) }
     var showSlogan by remember { mutableStateOf(false) }
     var showText by remember { mutableStateOf(false) }
     var showButton by remember { mutableStateOf(false) }
 
-    var isActive by remember { mutableStateOf(true) }
-
-    DisposableEffect(Unit) {
-        onDispose { isActive = false }
-    }
-
     LaunchedEffect(Unit) {
         delay(1500)
-        if (!isActive) return@LaunchedEffect
         showLogo = false
         delay(1000)
-        if (!isActive) return@LaunchedEffect
         showSlogan = true
         delay(500)
-        if (!isActive) return@LaunchedEffect
         showText = true
         delay(1000)
-        if (!isActive) return@LaunchedEffect
         showButton = true
+    }
+
+    // Check identity and navigate automatically after animation
+    LaunchedEffect(showButton) {
+        if (showButton) {
+            delay(500)
+            // Check if identity exists
+            val identityFileName = "qr_identity.png"
+            val identityBitmap = withContext(Dispatchers.IO) {
+                Controller.checkIdentityExists(context, identityFileName)
+            }
+
+            if (identityBitmap != null) {
+                Log.i("SplashScreen", "Identity found, going to main")
+                navController.navigate("main") {
+                    popUpTo("splash") { inclusive = true }
+                }
+            } else {
+                Log.i("SplashScreen", "No identity, going to registration")
+                navController.navigate("registration") {
+                    popUpTo("splash") { inclusive = true }
+                }
+            }
+        }
     }
 
     Box(
@@ -444,7 +193,22 @@ fun Welcome() {
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
                     ) {
-                        context.startActivity(Intent(context, RegistrationActivity::class.java))
+                        scope.launch {
+                            val identityFileName = "qr_identity.png"
+                            val identityBitmap = withContext(Dispatchers.IO) {
+                                Controller.checkIdentityExists(context, identityFileName)
+                            }
+
+                            if (identityBitmap != null) {
+                                navController.navigate("main") {
+                                    popUpTo("splash") { inclusive = true }
+                                }
+                            } else {
+                                navController.navigate("registration") {
+                                    popUpTo("splash") { inclusive = true }
+                                }
+                            }
+                        }
                     }
                     .padding(horizontal = 32.dp, vertical = 16.dp)
                     .background(MaterialTheme.colorScheme.primary, shape = MaterialTheme.shapes.medium)
@@ -452,7 +216,238 @@ fun Welcome() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
-                    Text("Register")
+                    Text("Enter")
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MainScreen(navController: NavHostController) {
+    val context = LocalContext.current
+
+    // Retrieve customization settings from DataStore
+    val chatSettingsFlow = getChatCustomizationSettings(context)
+    val chatCustomizationSettings by chatSettingsFlow.collectAsState(
+        initial = ChatCustomizationSettings()
+    )
+    val communitySettingsFlow = getCommunityCustomizationSettings(context)
+    val communityCustomizationSettings by communitySettingsFlow.collectAsState(
+        initial = CommunityCustomizationSettings()
+    )
+
+    val selectedTab = remember { mutableStateOf(Icons.Default.Home) }
+    var showCustomHome by remember { mutableStateOf(false) }
+    var accountIcon by remember { mutableStateOf(Icons.Default.Person) }
+    var iconScale by remember { mutableStateOf(1f) }
+    val animatedIconScale by animateFloatAsState(targetValue = iconScale)
+    val coroutineScope = rememberCoroutineScope()
+    var showingAuthor by remember { mutableStateOf(false) }
+
+    // I2P State - reuse existing daemon from Registration
+    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
+    val samClient = remember { SAMClient.getInstance() }
+    val messageManager = remember { MessageManager.getInstance(context) }
+    val contactRepository = remember { ContactRepository.getInstance(context) }
+
+    var i2pState by remember { mutableStateOf(I2pdDaemon.DaemonState.STOPPED) }
+    var isI2PReady by remember { mutableStateOf(false) }
+    var showI2PInitializing by remember { mutableStateOf(false) }
+
+    // State for navigation
+    var selectedContact by remember { mutableStateOf<Contact?>(null) }
+    var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
+
+    // Initialize messaging only - I2P already running from Registration
+    LaunchedEffect(Unit) {
+        Log.i("MainScreen", "Checking I2P status...")
+
+        // Check if daemon is already ready (started in Registration)
+        if (i2pdDaemon.isReady()) {
+            Log.i("MainScreen", "I2P already ready from Registration")
+            isI2PReady = true
+
+            // Initialize messaging
+            val msgInitSuccess = messageManager.initialize()
+            if (msgInitSuccess) {
+                val session = samClient.getActiveSessions().firstOrNull()
+                session?.let {
+                    messageManager.startListening(it.id)
+                }
+            }
+        } else if (i2pdDaemon.isRunning()) {
+            Log.i("MainScreen", "I2P running but not ready, waiting...")
+            showI2PInitializing = true
+            val ready = withContext(Dispatchers.IO) { i2pdDaemon.waitForReady() }
+            isI2PReady = ready
+            showI2PInitializing = false
+
+            if (ready) {
+                val msgInitSuccess = messageManager.initialize()
+                if (msgInitSuccess) {
+                    val session = samClient.getActiveSessions().firstOrNull()
+                    session?.let { messageManager.startListening(it.id) }
+                }
+            }
+        } else {
+            Log.e("MainScreen", "I2P not running! Should have been started in Registration")
+            // This shouldn't happen if flow is correct
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            Log.d("MainScreen", "MainScreen disposed but I2P keeps running")
+        }
+    }
+
+    if (showI2PInitializing) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator()
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Connecting to I2P network...",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
+    } else {
+        if (selectedCommunity != null) {
+            CommunityScreen(
+                community = selectedCommunity!!,
+                onBack = { selectedCommunity = null },
+                customization = communityCustomizationSettings
+            )
+        } else if (selectedContact != null) {
+            ChatScreen(
+                contactId = selectedContact!!.b32Address,
+                contactName = selectedContact!!.name,
+                customizationSettings = chatCustomizationSettings,
+                onBack = { selectedContact = null }
+            )
+        } else {
+            Scaffold(
+                modifier = Modifier.fillMaxSize(),
+                topBar = {
+                    TopAppBar(
+                        title = { Text("Anonymous") },
+                        actions = {
+                            IconButton(onClick = {
+                                iconScale = 1.2f
+                                coroutineScope.launch {
+                                    delay(200)
+                                    iconScale = 1f
+                                }
+                                if (accountIcon == Icons.Default.Person) {
+                                    showCustomHome = true
+                                    accountIcon = Icons.Default.Face
+                                } else {
+                                    showCustomHome = false
+                                    accountIcon = Icons.Default.Person
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = accountIcon,
+                                    contentDescription = "Account",
+                                    modifier = Modifier.scale(animatedIconScale)
+                                )
+                            }
+                        }
+                    )
+                },
+                bottomBar = {
+                    BottomAppBar {
+                        IconButton(
+                            onClick = { selectedTab.value = Icons.Default.Home },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Home,
+                                contentDescription = "Home",
+                                modifier = Modifier.size(26.dp),
+                                tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray
+                            )
+                        }
+                        IconButton(
+                            onClick = { selectedTab.value = Icons.Default.Search },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Search,
+                                contentDescription = "Search",
+                                modifier = Modifier.size(26.dp),
+                                tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(16.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            IconButton(onClick = { selectedTab.value = Icons.Default.Add }) {
+                                Icon(
+                                    Icons.Default.Add,
+                                    contentDescription = "Add",
+                                    tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { selectedTab.value = Icons.Default.PlayArrow },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = "User",
+                                modifier = Modifier.size(26.dp),
+                                tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray
+                            )
+                        }
+                        IconButton(
+                            onClick = { selectedTab.value = Icons.Default.Person },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                Icons.Default.Person,
+                                contentDescription = "Settings",
+                                modifier = Modifier.size(26.dp),
+                                tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray
+                            )
+                        }
+                    }
+                }
+            ) { innerPadding ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    when (selectedTab.value) {
+                        Icons.Default.Home -> HomeScreen(
+                            isCommunity = showCustomHome,
+                            onOpenChat = { contact -> selectedContact = contact },
+                            onOpenCommunity = { community -> selectedCommunity = community }
+                        )
+                        Icons.Default.Search -> SearchScreen()
+                        Icons.Default.Add -> PubblicScreen()
+                        Icons.Default.PlayArrow -> {
+                            if (showingAuthor) {
+                                AuthorScreen(onBack = { showingAuthor = false })
+                            } else {
+                                XScreen(onSwipeRight = { showingAuthor = true })
+                            }
+                        }
+                        Icons.Default.Person -> SettingsScreen()
+                    }
                 }
             }
         }
