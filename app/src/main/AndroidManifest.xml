@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"
         tools:ignore="ForegroundServicesPolicy" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:name=".AnonymousApp"
         android:hardwareAccelerated="false"
@@ -21,25 +24,29 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Anonymous"
         tools:targetApi="31">
+
+        <!-- I2P Service - runs in same process to keep daemon alive -->
         <service
             android:name=".i2p.I2pdService"
-            android:process=":i2pd"
             android:enabled="true"
             android:exported="false"
-            android:stopWithTask="false" />
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Single Main Activity handles all screens -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Anonymous">
+            android:theme="@style/Theme.Anonymous"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name=".ProvaActivity"/>
-        <activity android:name=".RegistrationActivity"/>
-        <activity android:name=".LoginActivity"/>
+
+        <!-- Remove separate activities - use Compose Navigation instead -->
         <activity android:name=".ChatCustomizationActivity"/>
         <activity android:name=".CommunityCustomizationActivity"/>
     </application>
