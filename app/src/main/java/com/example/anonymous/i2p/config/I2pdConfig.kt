@@ -58,7 +58,6 @@ object I2pdConfig {
             copyAsset("certificates/$entry", File(certificatesDest, entry))
         }
 
-        // Log the full cert tree so we can verify the structure i2pd expects
         Log.i(TAG, "Certificates ready: $copied copied, $skipped already present")
         Log.i(TAG, "Cert tree root: ${certificatesDest.absolutePath}")
         certificatesDest.walkTopDown().filter { it.isFile }.forEach { f ->
@@ -69,122 +68,81 @@ object I2pdConfig {
     fun generateConfig(context: Context): String {
         val dataDir = File(context.filesDir, "i2pd")
 
-        return """
-            # i2pd Mobile Configuration
-            # NOTE: datadir is intentionally omitted — set via JNI setDataDir() instead.
-
-            # Logging — debug level so we see output before logger fully inits
-            log = file
-            logfile = ${dataDir}/i2pd.log
-            loglevel = debug
-            logclftime = true
-
-            # Daemon mode (false for embedded/JNI use)
-            daemon = false
-
-            # Network id — MAINNET (1)
-            netid = 1
-
-            # Client-only: do not route traffic for others
-            notransit = true
-            floodfill = false
-
-            # Bandwidth
-            bandwidth = L
-
-            # Network protocols
-            ipv4 = true
-            ipv6 = false
-
-            # SAM bridge
-            [sam]
-            enabled = true
-            address = 127.0.0.1
-            port = 7656
-            portudp = 7655
-            singlethread = false
-
-            # Transit tunnel limits
-            [limits]
-            transittunnels = 0
-            coresize = 4
-            openfiles = 128
-            ntcphard = 16
-            ntcpsoft = 8
-
-            # SSU2 (UDP transport)
-            [ssu2]
-            enabled = true
-            published = false
-
-            # NTCP2 (TCP transport)
-            [ntcp2]
-            enabled = true
-            published = false
-            port = 0
-
-            # Exploratory tunnels
-            [exploratory]
-            inbound.length = 2
-            inbound.quantity = 3
-            outbound.length = 2
-            outbound.quantity = 3
-
-            # Crypto
-            [crypto]
-            tagtimeout = 2400
-
-            # HTTP console
-            [http]
-            enabled = true
-            address = 127.0.0.1
-            port = 7070
-
-            # Reseed
-            [reseed]
-            verify = true
-            threshold = 25
-            urls = https://reseed.i2p-projekt.de/,https://i2p.mooo.com/netDb/,https://reseed.memcpy.io/
-
-            # AddressBook
-            [addressbook]
-            defaulturl = http://shx5vqsw7usdaunyzr2qmes2fq37oumybpudrd4jjj4e4vk4uusa.b32.i2p/hosts.txt
-            subscriptions = http://stats.i2p/cgi-bin/newhosts.txt,http://i2p-projekt.i2p/hosts.txt
-
-            # UPnP
-            [upnp]
-            enabled = false
-
-            # Disabled services
-            [httpproxy]
-            enabled = false
-
-            [socksproxy]
-            enabled = false
-
-            [bob]
-            enabled = false
-
-            [i2cp]
-            enabled = false
-
-            [i2pcontrol]
-            enabled = false
-
-            # Precomputation
-            [precomputation]
-            elgamal = false
-
-            # Persistence
-            [persist]
-            profiles = false
-            addressbook = true
-
-            # Trust — family intentionally omitted (empty value causes parse errors)
-            [trust]
-            enabled = false
-            hidden = false
-        """.trimIndent()
+        return buildString {
+            appendLine("# i2pd configuration (Android embedded)")
+            appendLine("# datadir is set via JNI setDataDir() - do not add it here")
+            appendLine()
+            appendLine("log = file")
+            appendLine("logfile = ${dataDir.absolutePath}/i2pd.log")
+            appendLine("loglevel = debug")
+            appendLine("logclftime = true")
+            appendLine()
+            appendLine("daemon = false")
+            appendLine("netid = 1")
+            appendLine("notransit = true")
+            appendLine("floodfill = false")
+            appendLine("bandwidth = L")
+            appendLine("ipv4 = true")
+            appendLine("ipv6 = false")
+            appendLine()
+            appendLine("[sam]")
+            appendLine("enabled = true")
+            appendLine("address = 127.0.0.1")
+            appendLine("port = 7656")
+            appendLine("portudp = 7655")
+            appendLine()
+            appendLine("[limits]")
+            appendLine("transittunnels = 0")
+            appendLine("openfiles = 128")
+            appendLine()
+            appendLine("[ssu2]")
+            appendLine("enabled = true")
+            appendLine("published = false")
+            appendLine()
+            appendLine("[ntcp2]")
+            appendLine("enabled = true")
+            appendLine("published = false")
+            appendLine("port = 0")
+            appendLine()
+            appendLine("[exploratory]")
+            appendLine("inbound.length = 2")
+            appendLine("inbound.quantity = 3")
+            appendLine("outbound.length = 2")
+            appendLine("outbound.quantity = 3")
+            appendLine()
+            appendLine("[reseed]")
+            appendLine("verify = true")
+            appendLine("threshold = 25")
+            appendLine("urls = https://reseed.diva.exchange/,https://reseed2.i2p.net/,https://reseed-pl.i2pd.xyz/,https://i2p.novg.net/,https://reseed.memcpy.io/,https://reseed.i2pgit.org/")
+            appendLine()
+            appendLine("[http]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[httpproxy]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[socksproxy]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[bob]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[i2cp]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[i2pcontrol]")
+            appendLine("enabled = false")
+            appendLine()
+            appendLine("[precomputation]")
+            appendLine("elgamal = false")
+            appendLine()
+            appendLine("[persist]")
+            appendLine("profiles = false")
+            appendLine("addressbook = true")
+            appendLine()
+            appendLine("[upnp]")
+            appendLine("enabled = false")
+        }
     }
 
     fun writeConfig(context: Context): File {
