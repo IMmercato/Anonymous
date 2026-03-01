@@ -1,11 +1,17 @@
 package com.example.anonymous
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -27,6 +33,8 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -36,42 +44,90 @@ import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.datastore.CommunityCustomizationSettings
 import com.example.anonymous.datastore.getChatCustomizationSettings
 import com.example.anonymous.datastore.getCommunityCustomizationSettings
-import com.example.anonymous.i2p.I2pdDaemon
+import com.example.anonymous.i2p.I2pdService
 import com.example.anonymous.i2p.SAMClient
 import com.example.anonymous.messaging.MessageManager
 import com.example.anonymous.network.model.Contact
-import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.ui.theme.AnonymousTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            Log.i("MainActivity", "Notification permission granted")
+        } else {
+            Log.w("MainActivity", "Notification permission DENIED — foreground service may be killed by Android")
+        }
+        startI2pdService()
+    }
+
     @RequiresApi(Build.VERSION_CODES.VANILLA_ICE_CREAM)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         window.isFrameRatePowerSavingsBalanced = false
-
         enableEdgeToEdge()
+
+        requestBatteryOptimizationExemption()
+        requestNotificationPermissionThenStartService()
+
         setContent {
             AnonymousTheme {
                 val navController = rememberNavController()
-
                 NavHost(navController = navController, startDestination = "splash") {
-                    composable("splash") {
-                        SplashScreen(navController)
-                    }
-                    composable("registration") {
-                        RegistrationScreen(navController)
-                    }
-                    composable("main") {
-                        MainScreen(navController)
-                    }
+                    composable("splash") { SplashScreen(navController) }
+                    composable("registration") { RegistrationScreen(navController) }
+                    composable("main") { MainScreen(navController) }
                 }
             }
         }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                Log.i("MainActivity", "Requesting battery optimization exemption...")
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = "package:$packageName".toUri()
+                }
+                startActivity(intent)
+            } else {
+                Log.i("MainActivity", "Battery optimization already exempted ✓")
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Could not request battery exemption: ${e.message}")
+        }
+    }
+
+    private fun requestNotificationPermissionThenStartService() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val granted = ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+
+            if (granted) {
+                Log.i("MainActivity", "Notification permission already granted")
+                startI2pdService()
+            } else {
+                Log.i("MainActivity", "Requesting notification permission...")
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            startI2pdService()
+        }
+    }
+
+    private fun startI2pdService() {
+        Log.i("MainActivity", "Starting I2pdService from MainActivity")
+        I2pdService.start(this)
     }
 
     override fun onStop() {
@@ -106,11 +162,9 @@ fun SplashScreen(navController: NavHostController) {
         showButton = true
     }
 
-    // Check identity and navigate automatically after animation
     LaunchedEffect(showButton) {
         if (showButton) {
             delay(500)
-            // Check if identity exists
             val identityFileName = "qr_identity.png"
             val identityBitmap = withContext(Dispatchers.IO) {
                 Controller.checkIdentityExists(context, identityFileName)
@@ -192,32 +246,13 @@ fun SplashScreen(navController: NavHostController) {
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null
-                    ) {
-                        scope.launch {
-                            val identityFileName = "qr_identity.png"
-                            val identityBitmap = withContext(Dispatchers.IO) {
-                                Controller.checkIdentityExists(context, identityFileName)
-                            }
-
-                            if (identityBitmap != null) {
-                                navController.navigate("main") {
-                                    popUpTo("splash") { inclusive = true }
-                                }
-                            } else {
-                                navController.navigate("registration") {
-                                    popUpTo("splash") { inclusive = true }
-                                }
-                            }
-                        }
-                    }
-                    .padding(horizontal = 32.dp, vertical = 16.dp)
-                    .background(MaterialTheme.colorScheme.primary, shape = MaterialTheme.shapes.medium)
+                    ) { /* handled by LaunchedEffect auto-navigate */ }
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Enter")
-                }
+                Text(
+                    text = "Get Started",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }
@@ -227,94 +262,106 @@ fun SplashScreen(navController: NavHostController) {
 @Composable
 fun MainScreen(navController: NavHostController) {
     val context = LocalContext.current
-
-    // Retrieve customization settings from DataStore
-    val chatSettingsFlow = getChatCustomizationSettings(context)
-    val chatCustomizationSettings by chatSettingsFlow.collectAsState(
-        initial = ChatCustomizationSettings()
-    )
-    val communitySettingsFlow = getCommunityCustomizationSettings(context)
-    val communityCustomizationSettings by communitySettingsFlow.collectAsState(
-        initial = CommunityCustomizationSettings()
-    )
-
-    val selectedTab = remember { mutableStateOf(Icons.Default.Home) }
-    var showCustomHome by remember { mutableStateOf(false) }
-    var accountIcon by remember { mutableStateOf(Icons.Default.Person) }
-    var iconScale by remember { mutableStateOf(1f) }
-    val animatedIconScale by animateFloatAsState(targetValue = iconScale)
     val coroutineScope = rememberCoroutineScope()
-    var showingAuthor by remember { mutableStateOf(false) }
 
-    // I2P State - reuse existing daemon from Registration
-    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
     val samClient = remember { SAMClient.getInstance() }
     val messageManager = remember { MessageManager.getInstance(context) }
-    val contactRepository = remember { ContactRepository.getInstance(context) }
 
-    var i2pState by remember { mutableStateOf(I2pdDaemon.DaemonState.STOPPED) }
-    var isI2PReady by remember { mutableStateOf(false) }
-    var showI2PInitializing by remember { mutableStateOf(false) }
-
-    // State for navigation
+    var isConnecting by remember { mutableStateOf(true) }
+    var connectionError by remember { mutableStateOf<String?>(null) }
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
     var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
+    var selectedTab = remember { mutableStateOf(Icons.Default.Home) }
+    var showCustomHome by remember { mutableStateOf(false) }
+    var showingAuthor by remember { mutableStateOf(false) }
+    var accountIcon by remember { mutableStateOf(Icons.Default.Person) }
+    val animatedIconScale by animateFloatAsState(
+        targetValue = 1f,
+        animationSpec = tween(200),
+        label = "iconScale"
+    )
+    var iconScale by remember { mutableStateOf(1f) }
 
-    // Initialize messaging only - I2P already running from Registration
+    val chatCustomizationSettings by getChatCustomizationSettings(context)
+        .collectAsState(initial = ChatCustomizationSettings())
+    val communityCustomizationSettings by getCommunityCustomizationSettings(context)
+        .collectAsState(initial = CommunityCustomizationSettings())
+
+    // ✅ Define the helper function FIRST so it's available everywhere
+    fun isSamPortOpen(): Boolean = try {
+        java.net.Socket("127.0.0.1", 7656).use { it.isConnected }
+    } catch (_: Exception) { false }
+
     LaunchedEffect(Unit) {
-        Log.i("MainScreen", "Checking I2P status...")
+        I2pdService.start(context)
+    }
 
-        // Check if daemon is already ready (started in Registration)
-        if (i2pdDaemon.isReady()) {
-            Log.i("MainScreen", "I2P already ready from Registration")
-            isI2PReady = true
-
-            // Initialize messaging
-            val msgInitSuccess = messageManager.initialize()
-            if (msgInitSuccess) {
-                val session = samClient.getActiveSessions().firstOrNull()
-                session?.let {
-                    messageManager.startListening(it.id)
-                }
+    LaunchedEffect(Unit) {
+        var attempts = 0
+        while (attempts < 60) {
+            if (isSamPortOpen()) {
+                break
             }
-        } else if (i2pdDaemon.isRunning()) {
-            Log.i("MainScreen", "I2P running but not ready, waiting...")
-            showI2PInitializing = true
-            val ready = withContext(Dispatchers.IO) { i2pdDaemon.waitForReady() }
-            isI2PReady = ready
-            showI2PInitializing = false
+            delay(2000)
+            attempts++
+        }
+        if (attempts >= 60) {
+            connectionError = "I2P not ready after 2 minutes"
+            isConnecting = false
+            return@LaunchedEffect
+        }
 
-            if (ready) {
-                val msgInitSuccess = messageManager.initialize()
-                if (msgInitSuccess) {
-                    val session = samClient.getActiveSessions().firstOrNull()
-                    session?.let { messageManager.startListening(it.id) }
-                }
+        val success = messageManager.initialize()
+        if (success) {
+            samClient.getActiveSessions().firstOrNull()?.let {
+                messageManager.startListening(it.id)
             }
+            isConnecting = false
         } else {
-            Log.e("MainScreen", "I2P not running! Should have been started in Registration")
-            // This shouldn't happen if flow is correct
+            connectionError = "Failed to initialize messaging"
+            isConnecting = false
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            Log.d("MainScreen", "MainScreen disposed but I2P keeps running")
+    val connectionState by messageManager.connectionState.collectAsState()
+    LaunchedEffect(connectionState) {
+        when (connectionState) {
+            MessageManager.ConnectionState.Connected -> {
+                isConnecting = false
+                connectionError = null
+            }
+            MessageManager.ConnectionState.Disconnected -> {}
+            MessageManager.ConnectionState.Error -> {
+                connectionError = "Connection error"
+                isConnecting = false
+            }
+            else -> {}
         }
     }
 
-    if (showI2PInitializing) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
+    if (isConnecting) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Connecting to I2P network...",
-                    style = MaterialTheme.typography.bodyMedium
-                )
+                Text("Connecting to I2P network...", style = MaterialTheme.typography.bodyMedium)
+                connectionError?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Error: $it", color = Color.Red, fontSize = 12.sp)
+                }
+            }
+        }
+    } else if (connectionError != null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Failed to connect", color = Color.Red)
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(onClick = {
+                    isConnecting = true
+                    connectionError = null
+                }) {
+                    Text("Retry")
+                }
             }
         }
     } else {
@@ -352,82 +399,50 @@ fun MainScreen(navController: NavHostController) {
                                     accountIcon = Icons.Default.Person
                                 }
                             }) {
-                                Icon(
-                                    imageVector = accountIcon,
-                                    contentDescription = "Account",
-                                    modifier = Modifier.scale(animatedIconScale)
-                                )
+                                Icon(imageVector = accountIcon, contentDescription = "Account",
+                                    modifier = Modifier.scale(animatedIconScale))
                             }
                         }
                     )
                 },
                 bottomBar = {
                     BottomAppBar {
-                        IconButton(
-                            onClick = { selectedTab.value = Icons.Default.Home },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.Home,
-                                contentDescription = "Home",
+                        IconButton(onClick = { selectedTab.value = Icons.Default.Home },
+                            modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Home, contentDescription = "Home",
                                 modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray
-                            )
+                                tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray)
                         }
-                        IconButton(
-                            onClick = { selectedTab.value = Icons.Default.Search },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.Search,
-                                contentDescription = "Search",
+                        IconButton(onClick = { selectedTab.value = Icons.Default.Search },
+                            modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Search, contentDescription = "Search",
                                 modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray
-                            )
+                                tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray)
                         }
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
+                        Box(modifier = Modifier.weight(1f).padding(16.dp),
+                            contentAlignment = Alignment.Center) {
                             IconButton(onClick = { selectedTab.value = Icons.Default.Add }) {
-                                Icon(
-                                    Icons.Default.Add,
-                                    contentDescription = "Add",
-                                    tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray
-                                )
+                                Icon(Icons.Default.Add, contentDescription = "Add",
+                                    tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray)
                             }
                         }
-                        IconButton(
-                            onClick = { selectedTab.value = Icons.Default.PlayArrow },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.PlayArrow,
-                                contentDescription = "User",
+                        IconButton(onClick = { selectedTab.value = Icons.Default.PlayArrow },
+                            modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = "User",
                                 modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray
-                            )
+                                tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray)
                         }
-                        IconButton(
-                            onClick = { selectedTab.value = Icons.Default.Person },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                Icons.Default.Person,
-                                contentDescription = "Settings",
+                        IconButton(onClick = { selectedTab.value = Icons.Default.Person },
+                            modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Person, contentDescription = "Settings",
                                 modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray
-                            )
+                                tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray)
                         }
                     }
                 }
             ) { innerPadding ->
                 Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding),
+                    modifier = Modifier.fillMaxSize().padding(innerPadding),
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {

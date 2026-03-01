@@ -7,10 +7,11 @@
         android:name="android.hardware.camera"
         android:required="false"/>
     <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"
-        tools:ignore="ForegroundServicesPolicy" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name=".AnonymousApp"
@@ -25,13 +26,18 @@
         android:theme="@style/Theme.Anonymous"
         tools:targetApi="31">
 
-        <!-- I2P Service - runs in same process to keep daemon alive -->
+        <!-- I2P Service - runs in separate process to isolate native crashes -->
         <service
             android:name=".i2p.I2pdService"
             android:enabled="true"
             android:exported="false"
+            android:process=":i2pd"
             android:stopWithTask="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Anonymous I2P network routing daemon" />
+        </service>
 
         <!-- Single Main Activity handles all screens -->
         <activity
