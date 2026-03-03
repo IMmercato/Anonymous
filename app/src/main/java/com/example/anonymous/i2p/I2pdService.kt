@@ -21,7 +21,6 @@ import kotlinx.coroutines.*
 class I2pdService : Service() {
 
     private val binder = LocalBinder()
-    private var isServiceRunning = false
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
 
@@ -34,6 +33,8 @@ class I2pdService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "i2pd_foreground"
         private const val WAKELOCK_TIMEOUT_MS = 30 * 60 * 1000L
+
+        @Volatile private var daemonStarted = false
 
         fun start(context: Context) {
             Log.i(TAG, "start() called from ${context.javaClass.simpleName}")
@@ -77,11 +78,13 @@ class I2pdService : Service() {
             acquireWakeLock()
         }
 
-        if (!isServiceRunning) {
-            isServiceRunning = true
+        if (!daemonStarted) {
+            daemonStarted = true
             serviceScope.launch {
                 startDaemon()
             }
+        } else {
+            Log.i(TAG, "Daemon already started in this process — skipping re-launch")
         }
 
         return START_STICKY
@@ -129,7 +132,6 @@ class I2pdService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "I2pdService onDestroy — NOT stopping daemon (intentional)")
-        isServiceRunning = false
         serviceScope.cancel()
         releaseWakeLock()
         super.onDestroy()

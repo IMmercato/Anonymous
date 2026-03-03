@@ -267,7 +267,6 @@ fun MainScreen(navController: NavHostController) {
     val samClient = remember { SAMClient.getInstance() }
     val messageManager = remember { MessageManager.getInstance(context) }
 
-    var isConnecting by remember { mutableStateOf(true) }
     var connectionError by remember { mutableStateOf<String?>(null) }
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
     var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
@@ -287,22 +286,27 @@ fun MainScreen(navController: NavHostController) {
     val communityCustomizationSettings by getCommunityCustomizationSettings(context)
         .collectAsState(initial = CommunityCustomizationSettings())
 
-    // ✅ Define the helper function FIRST so it's available everywhere
-    fun isSamPortOpen(): Boolean = try {
-        java.net.Socket("127.0.0.1", 7656).use { it.isConnected }
-    } catch (_: Exception) { false }
-
-    LaunchedEffect(Unit) {
-        I2pdService.start(context)
+    suspend fun isSamPortOpen(): Boolean = withContext(Dispatchers.IO) {
+        try { java.net.Socket("127.0.0.1", 7656).use { it.isConnected } }
+        catch (_: Exception) { false }
     }
 
+    var isConnecting by remember { mutableStateOf(true) }
+
     LaunchedEffect(Unit) {
+        if (isSamPortOpen()) {
+            val success = messageManager.initialize()
+            if (!success) connectionError = "Failed to initialize messaging"
+            samClient.getActiveSessions().firstOrNull()
+                ?.let { messageManager.startListening(it.id) }
+            isConnecting = false
+            return@LaunchedEffect
+        }
+
         var attempts = 0
         while (attempts < 60) {
-            if (isSamPortOpen()) {
-                break
-            }
             delay(2000)
+            if (isSamPortOpen()) break
             attempts++
         }
         if (attempts >= 60) {
@@ -313,9 +317,8 @@ fun MainScreen(navController: NavHostController) {
 
         val success = messageManager.initialize()
         if (success) {
-            samClient.getActiveSessions().firstOrNull()?.let {
-                messageManager.startListening(it.id)
-            }
+            samClient.getActiveSessions().firstOrNull()
+                ?.let { messageManager.startListening(it.id) }
             isConnecting = false
         } else {
             connectionError = "Failed to initialize messaging"
