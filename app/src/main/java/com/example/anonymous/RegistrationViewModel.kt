@@ -9,7 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.anonymous.controller.Controller
 import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.i2p.I2pQRUtils
-import com.example.anonymous.i2p.I2pdDaemon import com.example.anonymous.i2p.I2pdService
+import com.example.anonymous.i2p.I2pdService
 import com.example.anonymous.i2p.SAMClient
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.utils.PrefsHelper
@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.net.Socket
 
 data class RegistrationUiState(
     val isLoading: Boolean = false,
@@ -28,14 +29,15 @@ data class RegistrationUiState(
     val errorMessage: String? = null,
     val identityBitmap: Bitmap? = null,
     val myB32: String? = null,
-    val isIdentityReady: Boolean = false
+    val isIdentityReady: Boolean = false,
+    val autoNavigate: Boolean = false
 )
 
 class RegistrationViewModel : ViewModel() {
     companion object {
         private const val TAG = "RegistrationViewModel"
         private const val IDENTITY_FILE_NAME = "qr_identity.png"
-        private const val DAEMON_READY_TIMEOUT_MS = 300_000L
+        private const val SAM_READY_TIMEOUT_MS = 600_000L  // 10 minutes
     }
 
     private val _uiState = MutableStateFlow(RegistrationUiState())
@@ -65,7 +67,8 @@ class RegistrationViewModel : ViewModel() {
                         it.copy(
                             identityBitmap = bitmap,
                             myB32 = existingIdentity.b32Address,
-                            isIdentityReady = true
+                            isIdentityReady = true,
+                            autoNavigate = true
                         )
                     }
                 } else {
@@ -88,57 +91,100 @@ class RegistrationViewModel : ViewModel() {
                 it.copy(
                     isLoading = true,
                     errorMessage = null,
-                    statusText = "Initializing I2P network..."
+                    statusText = "Starting I2P service..."
                 )
             }
 
             try {
                 val appContext = context.applicationContext
-                val daemon = I2pdDaemon.getInstance(appContext)
                 val samClient = SAMClient.getInstance()
                 val contactRepository = ContactRepository.getInstance(appContext)
 
-                // If daemon crashed previously, tell user to restart
-                if (daemon.getState() == I2pdDaemon.DaemonState.ERROR) {
-                    _uiState.update {
-                        it.copy(isLoading = false, errorMessage = "I2P crashed — please restart the app")
-                    }
-                    return@launch
-                }
-
-                // If already fully ready, skip straight to identity creation
-                if (daemon.isReady()) {
-                    Log.i(TAG, "Daemon already ready, skipping wait")
-                    createSessionAndIdentity(appContext, samClient, contactRepository)
-                    return@launch
-                }
-
-                // STEP 1: Tell the foreground Service to start the daemon.
-                // The Service owns daemon.start() — we NEVER call it from here.
-                // Using startForegroundService ensures it runs even when app is backgrounded.
+                // Step 1: Start the foreground service (separate process)
                 Log.i(TAG, "STEP 1: Starting I2pdService...")
                 withContext(Dispatchers.Main) {
                     I2pdService.start(appContext)
                 }
 
-                // STEP 2: Wait for the daemon to become ready.
-                // Give the service a moment to actually call daemon.start() before we poll.
-                Log.i(TAG, "STEP 2: Waiting for daemon to become ready...")
+                // Step 2: Wait for SAM port to become reachable
+                Log.i(TAG, "STEP 2: Waiting for SAM bridge...")
                 _uiState.update { it.copy(statusText = "Connecting to I2P network...") }
 
-                val ready = withContext(Dispatchers.IO) {
-                    daemon.waitForReady(timeoutMs = DAEMON_READY_TIMEOUT_MS)
+                val samReady = withContext(Dispatchers.IO) {
+                    waitForSamReady(timeoutMs = SAM_READY_TIMEOUT_MS)
                 }
 
-                Log.i(TAG, "waitForReady() = $ready")
-                if (!ready) {
+                if (!samReady) {
                     throw IllegalStateException(
-                        "I2P did not become ready within ${DAEMON_READY_TIMEOUT_MS / 1000}s. " +
-                                "Check your network connection."
+                        "I2P did not become ready within ${SAM_READY_TIMEOUT_MS / 1000}s."
                     )
                 }
 
-                createSessionAndIdentity(appContext, samClient, contactRepository)
+                // Step 3: Connect to SAM
+                Log.i(TAG, "STEP 3: Connecting to SAM...")
+                _uiState.update { it.copy(statusText = "Creating identity...") }
+
+                if (!samClient.isConnected.value) {
+                    val samConnected = withContext(Dispatchers.IO) { samClient.connect() }
+                    if (!samConnected) throw IllegalStateException("SAM bridge connection failed")
+                }
+
+                // Step 4: Create SAM stream session
+                Log.i(TAG, "STEP 4: Creating SAM stream session...")
+                val session = withContext(Dispatchers.IO) {
+                    samClient.createStreamSession().getOrThrow()
+                }
+                Log.i(TAG, "Session b32: ${session.b32Address}")
+
+                // Step 5: Generate ECDH key pair
+                Log.i(TAG, "STEP 5: Generating ECDH keys...")
+                val ecdhKeyPair = withContext(Dispatchers.IO) {
+                    CryptoManager.generateECDHKeyPair()
+                }
+                val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
+
+                // Step 6: Persist identity
+                Log.i(TAG, "STEP 6: Saving identity...")
+                withContext(Dispatchers.IO) {
+                    CryptoManager.saveKeyPair(appContext, session.b32Address, ecdhKeyPair)
+                    PrefsHelper.saveKeyAlias(appContext, session.b32Address)
+                }
+                contactRepository.saveMyIdentity(
+                    ContactRepository.MyIdentity(
+                        b32Address = session.b32Address,
+                        publicKey = session.destination,
+                        privateKeyEncrypted = ecPublicB64
+                    )
+                )
+
+                // Step 7: Generate QR code
+                Log.i(TAG, "STEP 7: Generating QR code...")
+                _uiState.update { it.copy(statusText = "Generating QR code...") }
+                val qrContent = I2pQRUtils.generateQRContent(
+                    b32Address = session.b32Address,
+                    i2pDestination = session.destination,
+                    ecPublicKey = ecPublicB64
+                )
+                val bitmap = withContext(Dispatchers.IO) {
+                    Controller.generateQRCode(qrContent)
+                } ?: throw IllegalStateException("QR generation failed")
+
+                withContext(Dispatchers.IO) {
+                    Controller.saveBitmapToInternalStorage(appContext, bitmap, IDENTITY_FILE_NAME)
+                    Controller.saveBitmapToGallery(appContext, bitmap, IDENTITY_FILE_NAME)
+                }
+
+                Log.i(TAG, ">>> createIdentity() SUCCESS <<<")
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        identityBitmap = bitmap,
+                        myB32 = session.b32Address,
+                        isIdentityReady = true,
+                        autoNavigate = false,
+                        statusText = "Identity created!"
+                    )
+                }
 
             } catch (e: Exception) {
                 Log.e(TAG, "!!! createIdentity() FAILED !!!", e)
@@ -152,100 +198,36 @@ class RegistrationViewModel : ViewModel() {
         }
     }
 
-    private suspend fun createSessionAndIdentity(
-        appContext: Context,
-        samClient: SAMClient,
-        contactRepository: ContactRepository
-    ) {
-        try {
-            // STEP 3: Connect to SAM bridge
-            Log.i(TAG, "STEP 3: Connecting to SAM...")
-            _uiState.update { it.copy(statusText = "Creating identity...") }
-
-            if (!samClient.isConnected.value) {
-                val samConnected = withContext(Dispatchers.IO) { samClient.connect() }
-                Log.i(TAG, "samClient.connect() = $samConnected")
-                if (!samConnected) throw IllegalStateException("SAM bridge connection failed")
-            } else {
-                Log.i(TAG, "SAM already connected, reusing")
+    private suspend fun waitForSamReady(timeoutMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var attempt = 0
+        while (System.currentTimeMillis() < deadline) {
+            attempt++
+            if (isSamPortOpen()) {
+                Log.i(TAG, "SAM port ready after $attempt attempts")
+                return true
             }
 
-            // STEP 4: Create stream session (this gives us our I2P identity)
-            Log.i(TAG, "STEP 4: Creating SAM stream session...")
-            val session = withContext(Dispatchers.IO) {
-                samClient.createStreamSession().getOrThrow()
+            val elapsedSec = attempt * 2
+            val statusText = when {
+                elapsedSec < 30  -> "Connecting to I2P network..."
+                elapsedSec < 120 -> "Downloading network database (~${elapsedSec}s).\nFirst launch takes a few minutes."
+                elapsedSec < 300 -> "Reseeding network database (~${elapsedSec / 60}min).\nPlease keep the app open."
+                else             -> "Still reseeding... (~${elapsedSec / 60}min elapsed).\nThis is normal on first launch."
             }
-            Log.i(TAG, "Session b32: ${session.b32Address}")
+            _uiState.update { it.copy(statusText = statusText) }
 
-            // STEP 5: Generate ECDH key pair for end-to-end encryption
-            Log.i(TAG, "STEP 5: Generating ECDH keys...")
-            val ecdhKeyPair = withContext(Dispatchers.IO) {
-                CryptoManager.generateECDHKeyPair()
-            }
-            val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
-
-            // STEP 6: Persist identity to storage
-            Log.i(TAG, "STEP 6: Saving identity...")
-            withContext(Dispatchers.IO) {
-                CryptoManager.saveKeyPair(appContext, session.b32Address, ecdhKeyPair)
-                PrefsHelper.saveKeyAlias(appContext, session.b32Address)
-            }
-            contactRepository.saveMyIdentity(
-                ContactRepository.MyIdentity(
-                    b32Address = session.b32Address,
-                    publicKey = session.destination,
-                    privateKeyEncrypted = ecPublicB64
-                )
-            )
-
-            // STEP 7: Generate QR code
-            Log.i(TAG, "STEP 7: Generating QR code...")
-            _uiState.update { it.copy(statusText = "Generating QR code...") }
-            val qrContent = I2pQRUtils.generateQRContent(
-                b32Address = session.b32Address,
-                i2pDestination = session.destination,
-                ecPublicKey = ecPublicB64
-            )
-            val bitmap = withContext(Dispatchers.IO) {
-                Controller.generateQRCode(qrContent)
-            } ?: throw IllegalStateException("QR generation failed")
-
-            withContext(Dispatchers.IO) {
-                Controller.saveBitmapToInternalStorage(appContext, bitmap, IDENTITY_FILE_NAME)
-                Controller.saveBitmapToGallery(appContext, bitmap, IDENTITY_FILE_NAME)
-            }
-
-            Log.i(TAG, ">>> createIdentity() SUCCESS <<<")
-            _uiState.update {
-                it.copy(
-                    isLoading = false,
-                    identityBitmap = bitmap,
-                    myB32 = session.b32Address,
-                    isIdentityReady = true,
-                    statusText = "Identity created!"
-                )
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in createSessionAndIdentity", e)
-            throw e
+            delay(2000)
         }
+        Log.e(TAG, "SAM port not ready after $timeoutMs ms")
+        return false
     }
 
-    fun onDaemonStateChanged(state: I2pdDaemon.DaemonState) {
-        if (!_uiState.value.isLoading) return
-        val text = when (state) {
-            I2pdDaemon.DaemonState.STARTING            -> "Starting I2P..."
-            I2pdDaemon.DaemonState.BUILDING_TUNNELS    -> "Building tunnels..."
-            I2pdDaemon.DaemonState.WAITING_FOR_NETWORK -> "Waiting for network..."
-            I2pdDaemon.DaemonState.RESEEDING           -> "Reseeding (first-time setup)..."
-            I2pdDaemon.DaemonState.READY               -> "I2P Ready!"
-            else                                       -> state.name
+    private fun isSamPortOpen(): Boolean {
+        return try {
+            Socket("127.0.0.1", 7656).use { it.isConnected }
+        } catch (_: Exception) {
+            false
         }
-        _uiState.update { it.copy(statusText = text) }
-    }
-
-    fun onDaemonError(error: String) {
-        Log.e(TAG, "Daemon error: $error")
-        _uiState.update { it.copy(isLoading = false, errorMessage = error) }
     }
 }
