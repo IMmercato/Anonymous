@@ -7,6 +7,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okio.IOException
 import java.io.BufferedReader
@@ -21,9 +23,6 @@ import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-/**
- * SAM Protocol Client
- */
 class SAMClient private constructor() {
     companion object {
         private const val TAG = "SAMClient"
@@ -50,7 +49,8 @@ class SAMClient private constructor() {
     private var controlSocket: Socket? = null
     private var controlReader: BufferedReader? = null
     private var controlWriter: PrintWriter? = null
-    private val isConnected = MutableStateFlow(false)
+    private val _isConnected = MutableStateFlow(false)
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
     data class SAMSession(
         val id: String,
@@ -61,29 +61,29 @@ class SAMClient private constructor() {
     )
 
     enum class SessionStyle {
-        STREAM,     // TCP-like reliable streams
-        DATAGRAM,   // UDP-like messages
-        RAW         // Anonymous datagram
+        STREAM,
+        DATAGRAM,
+        RAW
     }
 
-    /**
-     * Connect to SAM bridge
-     */
     suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         try {
+            if (_isConnected.value && controlSocket?.isConnected == true) {
+                Log.d(TAG, "Already connected, reusing connection")
+                return@withContext true
+            }
+
             controlSocket = Socket(SAM_HOST, SAM_PORT)
-            controlSocket?.soTimeout = 3000
 
             controlReader = BufferedReader(InputStreamReader(controlSocket!!.getInputStream()))
             controlWriter = PrintWriter(OutputStreamWriter(controlSocket!!.getOutputStream()), true)
 
-            // HELLO handshake
             if (!helloHandshake()) {
                 disconnect()
                 return@withContext false
             }
 
-            isConnected.value = true
+            _isConnected.value = true
             Log.i(TAG, "Connected to SAM bridge")
             true
         } catch (e: Exception) {
@@ -110,24 +110,19 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Create a new STREAM session
-     */
     suspend fun createStreamSession(): Result<SAMSession> = withContext(Dispatchers.IO) {
         try {
             val sessionId = "stream_${sessionCounter.incrementAndGet()}_${System.currentTimeMillis()}"
 
-            // Create session with transient destination (Ed25519)
             sendCommand("SESSION CREATE STYLE=STREAM ID=$sessionId DESTINATION=TRANSIENT SIGNATURE_TYPE=$SIGNATURE_TYPE")
 
             val response = readResponse()
             Log.d(TAG, "SESSION CREATE response: $response")
 
             if (response.startsWith("SESSION STATUS RESULT=OK")) {
-                // Parse destination from response
-                val destination = extractValue(response, "DESTINATION") ?: return@withContext Result.failure(Exception("No destination in response"))
+                val destination = extractValue(response, "DESTINATION")
+                    ?: return@withContext Result.failure(Exception("No destination in response"))
 
-                // Calculate b32 address from destination
                 val b32Address = destinationToB32(destination)
 
                 val session = SAMSession(
@@ -150,9 +145,6 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Create a DATAGRAM session
-     */
     suspend fun createDatagramSession(forwardPort: Int = 0): Result<SAMSession> = withContext(Dispatchers.IO) {
         try {
             val sessionId = "dgram_${sessionCounter.incrementAndGet()}_${System.currentTimeMillis()}"
@@ -163,7 +155,8 @@ class SAMClient private constructor() {
             val response = readResponse()
 
             if (response.startsWith("SESSION STATUS RESULT=OK")) {
-                val destination = extractValue(response, "DESTINATION") ?: return@withContext Result.failure(Exception("No destination in response"))
+                val destination = extractValue(response, "DESTINATION")
+                    ?: return@withContext Result.failure(Exception("No destination in response"))
 
                 val b32Address = destinationToB32(destination)
 
@@ -186,19 +179,14 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Connect to a peer using STREAM CONNECT
-     */
     suspend fun connectToPeer(sessionId: String, peerB32: String): Result<Socket> = withContext(Dispatchers.IO) {
         try {
-            // Open new socket for this connection
             val connSocket = Socket(SAM_HOST, SAM_PORT)
             connSocket.soTimeout = 60000
 
             val reader = BufferedReader(InputStreamReader(connSocket.getInputStream()))
             val writer = PrintWriter(OutputStreamWriter(connSocket.getOutputStream()), true)
 
-            // HELLO
             writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
             val helloResp = reader.readLine()
             if (!helloResp.startsWith("HELLO REPLY RESULT=OK")) {
@@ -206,7 +194,6 @@ class SAMClient private constructor() {
                 return@withContext Result.failure(Exception("HELLO failed: $helloResp"))
             }
 
-            // STREAM CONNECT
             writer.println("STREAM CONNECT ID=$sessionId DESTINATION=$peerB32 SILENT=false")
             val connectResp = reader.readLine()
 
@@ -221,18 +208,14 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Accept incoming connections
-     */
     suspend fun acceptConnection(sessionId: String): Result<Pair<Socket, String>> = withContext(Dispatchers.IO) {
         try {
             val acceptSocket = Socket(SAM_HOST, SAM_PORT)
-            acceptSocket.soTimeout = 0  // Block untill connection
+            acceptSocket.soTimeout = 0
 
             val reader = BufferedReader(InputStreamReader(acceptSocket.getInputStream()))
             val writer = PrintWriter(OutputStreamWriter(acceptSocket.getOutputStream()), true)
 
-            // HELLO
             writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
             val helloResp = reader.readLine()
             if (!helloResp.startsWith("HELLO REPLY RESULT=OK")) {
@@ -240,12 +223,10 @@ class SAMClient private constructor() {
                 return@withContext Result.failure(Exception("HELLO failed"))
             }
 
-            // STREAM ACCEPT
             writer.println("STREAM ACCEPT ID=$sessionId SILENT=false")
             val acceptResp = reader.readLine()
 
             if (acceptResp.startsWith("STREAM STATUS RESULT=OK")) {
-                // Read peer destination
                 val peerDest = reader.readLine()
                 Log.i(TAG, "Accepted connection from: $peerDest")
                 Result.success(Pair(acceptSocket, peerDest))
@@ -258,25 +239,20 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Send a repliable datagram
-     */
     suspend fun sendDatagram(
         sessionId: String,
         peerB32: String,
         data: ByteArray
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val session = activeSessions[sessionId] ?: return@withContext Result.failure(Exception("Session not found"))
+            val session = activeSessions[sessionId]
+                ?: return@withContext Result.failure(Exception("Session not found"))
 
             if (session.style != SessionStyle.DATAGRAM) {
                 return@withContext Result.failure(Exception("Not a DATAGRAM session"))
             }
 
-            // Send via SAM UDP port
             val udpSocket = DatagramSocket()
-
-            // Build datagram header
             val header = "3.0 $sessionId $peerB32\n".toByteArray(Charsets.UTF_8)
             val packetData = header + data
 
@@ -296,9 +272,6 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Look up a destination by b32 address
-     */
     suspend fun namingLookup(name: String): Result<String> = withContext(Dispatchers.IO) {
         try {
             sendCommand("NAMING LOOKUP NAME=$name")
@@ -319,9 +292,6 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Generate a new destination
-     */
     suspend fun generateDestination(): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
             sendCommand("DEST GENERATE SIGNATURE_TYPE=$SIGNATURE_TYPE")
@@ -344,41 +314,28 @@ class SAMClient private constructor() {
         }
     }
 
-    /**
-     * Remove a session
-     */
     fun removeSession(sessionId: String) {
         activeSessions.remove(sessionId)
     }
 
-    /**
-     * Get all active session
-     */
     fun getActiveSessions(): List<SAMSession> = activeSessions.values.toList()
 
-    /**
-     * Disconnect from SAM bridge
-     */
     fun disconnect() {
         try {
             controlSocket?.close()
             activeSessions.clear()
-            isConnected.value = false
+            _isConnected.value = false
             Log.i(TAG, "Disconnected from SAM")
         } catch (e: Exception) {
             Log.e(TAG, "Error disconnecting", e)
         }
     }
 
-    /**
-     * Cleanup resources
-     */
     fun cleanup() {
         disconnect()
         scope.cancel()
     }
 
-    // Private helpers
     private fun sendCommand(command: String) {
         controlWriter?.println(command)
         Log.d(TAG, "SAM -> $command")
@@ -395,16 +352,11 @@ class SAMClient private constructor() {
         return regex.find(response)?.groupValues?.get(1)
     }
 
-    /**
-     * Convert base64 destination to b32 address
-     */
     private fun destinationToB32(destination: String): String {
-        // Decode base64, SHA256 hash, base32 encode
-        val decoded = Base64.decode(destination, Base64.DEFAULT)
+        val standardBase64 = destination.replace('-', '+').replace('~', '/')
+        val decoded = Base64.decode(standardBase64, Base64.DEFAULT)
         val md = MessageDigest.getInstance("SHA-256")
         val hash = md.digest(decoded)
-
-        // Base32 encode
         val b32 = encodeBase32(hash)
         return "$b32.b32.i2p"
     }
