@@ -65,6 +65,24 @@ object I2pdConfig {
         }
     }
 
+    fun copyCABundle(context: Context) {
+        val destFile = File(context.filesDir, "i2pd/cacert.pem")
+        if (!destFile.exists()) {
+            try {
+                context.assets.open("cacert.pem").use { inputStream ->
+                    destFile.outputStream().use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+                Log.i(TAG, "Copied cacert.pem to ${destFile.absolutePath}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to copy cacert.pem: ${e.message}")
+            }
+        } else {
+            Log.d(TAG, "cacert.pem already exists, skipping copy")
+        }
+    }
+
     fun generateConfig(context: Context): String {
         val dataDir = File(context.filesDir, "i2pd")
 
@@ -78,7 +96,6 @@ object I2pdConfig {
             appendLine("logclftime = true")
             appendLine()
             appendLine("daemon = false")
-            appendLine("netid = 1")
             appendLine("notransit = true")
             appendLine("floodfill = false")
             appendLine("bandwidth = L")
