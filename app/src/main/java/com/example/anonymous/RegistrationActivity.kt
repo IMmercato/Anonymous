@@ -22,12 +22,12 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.edit
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.anonymous.controller.Controller
-import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.i2p.I2pQRUtils
 import com.example.anonymous.i2p.I2pdService
 import com.example.anonymous.i2p.SAMClient
@@ -41,7 +41,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.net.Socket
 
 private const val TAG = "RegistrationScreen"
 
@@ -60,6 +59,13 @@ class RegistrationViewModel : ViewModel() {
         private const val TAG = "RegistrationViewModel"
         private const val IDENTITY_FILE_NAME = "qr_identity.png"
         private const val SAM_READY_TIMEOUT_MS = 600_000L // 10 minutes
+
+        private const val PREFS_NAME = "i2p_identity"
+        private const val KEY_PRIV   = "sam_priv_key"
+        private const val KEY_PUB    = "sam_pub_key"
+
+        private const val SESSION_CREATE_MAX_RETRIES = 5
+        private const val SESSION_CREATE_RETRY_DELAY_MS = 3_000L
     }
 
     private val _uiState = MutableStateFlow(RegistrationUiState())
@@ -121,48 +127,58 @@ class RegistrationViewModel : ViewModel() {
                 Log.i(TAG, "STEP 1: Starting I2pdService...")
                 withContext(Dispatchers.Main) { I2pdService.start(appContext) }
 
-                Log.i(TAG, "STEP 2: Waiting for SAM bridge...")
+                Log.i(TAG, "STEP 2: Waiting for stable SAM bridge...")
                 _uiState.update { it.copy(statusText = "Connecting to I2P network...") }
                 val samReady = withContext(Dispatchers.IO) {
-                    waitForSamReady(SAM_READY_TIMEOUT_MS)
+                    waitForSamStable(SAM_READY_TIMEOUT_MS, samClient)
                 }
                 if (!samReady) throw IllegalStateException(
                     "I2P did not become ready within ${SAM_READY_TIMEOUT_MS / 1000}s."
                 )
 
-                Log.i(TAG, "STEP 3: Connecting to SAM...")
+                Log.i(TAG, "STEP 3: SAM bridge confirmed stable")
                 _uiState.update { it.copy(statusText = "Creating identity...") }
-                if (!samClient.isConnected.value) {
-                    val connected = withContext(Dispatchers.IO) { samClient.connect() }
-                    if (!connected) throw IllegalStateException("SAM bridge connection failed")
+
+                Log.i(TAG, "STEP 4: Generating persistent SAM destination...")
+                val (pub, priv) = withContext(Dispatchers.IO) {
+                    samClient.generateDestination().getOrThrow()
                 }
 
-                Log.i(TAG, "STEP 4: Creating SAM stream session...")
+                Log.i(TAG, "STEP 5: Creating SAM stream session with persistent key (with retry)...")
                 val session = withContext(Dispatchers.IO) {
-                    samClient.createStreamSession().getOrThrow()
-                }
-                Log.i(TAG, "Session b32: ${session.b32Address}")
+                    createSessionWithRetry(samClient, priv)
+                } ?: throw IllegalStateException("Failed to create SAM session after $SESSION_CREATE_MAX_RETRIES retries")
 
-                Log.i(TAG, "STEP 5: Generating ECDH keys...")
-                val ecdhKeyPair = withContext(Dispatchers.IO) {
-                    CryptoManager.generateECDHKeyPair()
-                }
-                val ecPublicB64 = Base64.encodeToString(ecdhKeyPair.public.encoded, Base64.NO_WRAP)
+                // Only save keys to prefs after session is successfully created
+                appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit {
+                        putString(KEY_PRIV, priv)
+                        putString(KEY_PUB, pub)
+                    }
+                Log.i(TAG, "STEP 5: Session created and keys saved. b32: ${session.b32Address}")
 
-                Log.i(TAG, "STEP 6: Saving identity...")
+                Log.i(TAG, "STEP 6: Generating ECDH keys...")
+                val alias = session.b32Address
                 withContext(Dispatchers.IO) {
-                    CryptoManager.saveKeyPair(appContext, session.b32Address, ecdhKeyPair)
-                    PrefsHelper.saveKeyAlias(appContext, session.b32Address)
+                    PrefsHelper.generateOrGetECDHKeyPair(context, alias)
+                }
+                val ecPublicBytes = PrefsHelper.getECPublicKeyBytes(context, alias)
+                    ?: throw IllegalStateException("Could not read own EC public key after generation")
+                val ecPublicB64 = Base64.encodeToString(ecPublicBytes, Base64.NO_WRAP)
+
+                Log.i(TAG, "STEP 7: Saving identity to ContactRepository...")
+                withContext(Dispatchers.IO) {
+                    PrefsHelper.saveKeyAlias(appContext, alias)
                 }
                 contactRepository.saveMyIdentity(
                     ContactRepository.MyIdentity(
                         b32Address = session.b32Address,
-                        publicKey = session.destination,
-                        privateKeyEncrypted = ecPublicB64
+                        publicKey = session.destination,    // PUB destination (shared with peers)
+                        privateKeyEncrypted = ecPublicB64   // EC public key (for ECDH encryption)
                     )
                 )
 
-                Log.i(TAG, "STEP 7: Generating QR code...")
+                Log.i(TAG, "STEP 8: Generating QR code...")
                 _uiState.update { it.copy(statusText = "Generating QR code...") }
                 val qrContent = I2pQRUtils.generateQRContent(
                     b32Address = session.b32Address,
@@ -198,33 +214,71 @@ class RegistrationViewModel : ViewModel() {
         }
     }
 
-    private suspend fun waitForSamReady(timeoutMs: Long): Boolean {
+    private suspend fun createSessionWithRetry(
+        samClient: SAMClient,
+        privKey: String
+    ): SAMClient.SAMSession? {
+        repeat(SESSION_CREATE_MAX_RETRIES) { attempt ->
+            Log.i(TAG, "SESSION CREATE attempt ${attempt + 1}/$SESSION_CREATE_MAX_RETRIES")
+            val result = samClient.createStreamSession(savedPrivateKey = privKey)
+            if (result.isSuccess) {
+                return result.getOrThrow()
+            }
+            val err = result.exceptionOrNull()
+            Log.w(TAG, "Session create attempt ${attempt + 1} failed: ${err?.message}")
+
+            if (attempt < SESSION_CREATE_MAX_RETRIES - 1) {
+                _uiState.update {
+                    it.copy(statusText = "Retrying session creation (${attempt + 2}/$SESSION_CREATE_MAX_RETRIES)...")
+                }
+                delay(SESSION_CREATE_RETRY_DELAY_MS)
+
+                // Wait for SAM to be responsive again before retrying
+                val samBack = waitForSamStable(30_000L, samClient)
+                if (!samBack) {
+                    Log.w(TAG, "SAM did not recover before retry ${attempt + 2}, trying anyway")
+                }
+            }
+        }
+        return null
+    }
+
+    private suspend fun waitForSamStable(timeoutMs: Long, samClient: SAMClient): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         var attempt = 0
         while (System.currentTimeMillis() < deadline) {
             attempt++
-            if (isSamPortOpen()) {
-                Log.i(TAG, "SAM port ready after $attempt attempts")
+            val firstOk = withContext(Dispatchers.IO) { samClient.connect() }
+            if (!firstOk) {
+                val elapsedSec = attempt * 2
+                _uiState.update {
+                    it.copy(statusText = when {
+                        elapsedSec < 30  -> "Connecting to I2P network..."
+                        elapsedSec < 120 -> "Downloading network database (~${elapsedSec}s).\nFirst launch takes a few minutes."
+                        elapsedSec < 300 -> "Reseeding network database (~${elapsedSec / 60}min).\nPlease keep the app open."
+                        else             -> "Still reseeding... (~${elapsedSec / 60}min elapsed).\nThis is normal on first launch."
+                    })
+                }
+                delay(2000)
+                continue
+            }
+
+            Log.i(TAG, "SAM responded (attempt $attempt), confirming stability in 3s...")
+            _uiState.update { it.copy(statusText = "Verifying I2P stability...") }
+            delay(3000)
+
+            val secondOk = withContext(Dispatchers.IO) { samClient.connect() }
+            if (secondOk) {
+                Log.i(TAG, "SAM confirmed stable after $attempt attempts")
                 return true
             }
-            val elapsedSec = attempt * 2
-            _uiState.update {
-                it.copy(statusText = when {
-                    elapsedSec < 30  -> "Connecting to I2P network..."
-                    elapsedSec < 120 -> "Downloading network database (~${elapsedSec}s).\nFirst launch takes a few minutes."
-                    elapsedSec < 300 -> "Reseeding network database (~${elapsedSec / 60}min).\nPlease keep the app open."
-                    else             -> "Still reseeding... (~${elapsedSec / 60}min elapsed).\nThis is normal on first launch."
-                })
-            }
-            delay(2000)
+
+            // SAM died in those 3s — i2pd is still cycling, keep waiting
+            Log.w(TAG, "SAM was alive but died within 3s — i2pd still restarting, continuing to wait")
         }
-        Log.e(TAG, "SAM port not ready after ${timeoutMs}ms")
+        Log.e(TAG, "SAM bridge not stable after ${timeoutMs}ms")
         return false
     }
-
-    private fun isSamPortOpen(): Boolean = try {
-        Socket("127.0.0.1", 7656).use { it.isConnected }
-    } catch (_: Exception) { false }
 }
 
 @Composable

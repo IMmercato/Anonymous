@@ -1,6 +1,7 @@
 package com.example.anonymous
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -274,31 +275,38 @@ fun MainScreen(navController: NavHostController) {
     var showCustomHome by remember { mutableStateOf(false) }
     var showingAuthor by remember { mutableStateOf(false) }
     var accountIcon by remember { mutableStateOf(Icons.Default.Person) }
+    var iconScale by remember { mutableStateOf(1f) }
     val animatedIconScale by animateFloatAsState(
-        targetValue = 1f,
+        targetValue = iconScale,
         animationSpec = tween(200),
         label = "iconScale"
     )
-    var iconScale by remember { mutableStateOf(1f) }
 
     val chatCustomizationSettings by getChatCustomizationSettings(context)
         .collectAsState(initial = ChatCustomizationSettings())
     val communityCustomizationSettings by getCommunityCustomizationSettings(context)
         .collectAsState(initial = CommunityCustomizationSettings())
 
-    suspend fun isSamPortOpen(): Boolean = withContext(Dispatchers.IO) {
-        try { java.net.Socket("127.0.0.1", 7656).use { it.isConnected } }
-        catch (_: Exception) { false }
-    }
-
     var isConnecting by remember { mutableStateOf(true) }
+    var retryKey by remember { mutableStateOf(0) }
 
-    LaunchedEffect(Unit) {
-        if (isSamPortOpen()) {
-            val success = messageManager.initialize()
-            if (!success) connectionError = "Failed to initialize messaging"
-            samClient.getActiveSessions().firstOrNull()
-                ?.let { messageManager.startListening(it.id) }
+    var hasConnectedOnce by remember { mutableStateOf(false) }
+
+    LaunchedEffect(retryKey) {
+        isConnecting = true
+        connectionError = null
+
+        val existingSession = samClient.getActiveSessions().lastOrNull()
+        if (existingSession != null) {
+            Log.i("MainScreen", "Reusing registration session: ${existingSession.id}")
+            messageManager.startListening(existingSession.id)
+            return@LaunchedEffect
+        }
+
+        val prefs = context.getSharedPreferences("i2p_identity", Context.MODE_PRIVATE)
+        val savedPrivateKey = prefs.getString("sam_priv_key", null)
+        if (savedPrivateKey == null) {
+            connectionError = "No identity found — please re-register."
             isConnecting = false
             return@LaunchedEffect
         }
@@ -306,7 +314,10 @@ fun MainScreen(navController: NavHostController) {
         var attempts = 0
         while (attempts < 60) {
             delay(2000)
-            if (isSamPortOpen()) break
+            val ok = withContext(Dispatchers.IO) {
+                try { samClient.connect() } catch (_: Exception) { false }
+            }
+            if (ok) break
             attempts++
         }
         if (attempts >= 60) {
@@ -315,15 +326,17 @@ fun MainScreen(navController: NavHostController) {
             return@LaunchedEffect
         }
 
-        val success = messageManager.initialize()
-        if (success) {
-            samClient.getActiveSessions().firstOrNull()
-                ?.let { messageManager.startListening(it.id) }
-            isConnecting = false
-        } else {
-            connectionError = "Failed to initialize messaging"
-            isConnecting = false
+        val session = withContext(Dispatchers.IO) {
+            samClient.createStreamSession(savedPrivateKey = savedPrivateKey).getOrNull()
         }
+        if (session == null) {
+            connectionError = "Failed to restore I2P session"
+            isConnecting = false
+            return@LaunchedEffect
+        }
+
+        Log.i("MainScreen", "Recreated session after i2pd restart: ${session.id}")
+        messageManager.startListening(session.id)
     }
 
     val connectionState by messageManager.connectionState.collectAsState()
@@ -333,9 +346,14 @@ fun MainScreen(navController: NavHostController) {
                 isConnecting = false
                 connectionError = null
             }
-            MessageManager.ConnectionState.Disconnected -> {}
+            MessageManager.ConnectionState.Disconnected -> {
+                if (hasConnectedOnce) {
+                    connectionError = "I2P connection lost"
+                    isConnecting = false
+                }
+            }
             MessageManager.ConnectionState.Error -> {
-                connectionError = "Connection error"
+                connectionError = "I2P session lost — tap Retry"
                 isConnecting = false
             }
             else -> {}
@@ -360,8 +378,7 @@ fun MainScreen(navController: NavHostController) {
                 Text("Failed to connect", color = Color.Red)
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(onClick = {
-                    isConnecting = true
-                    connectionError = null
+                    retryKey++
                 }) {
                     Text("Retry")
                 }
