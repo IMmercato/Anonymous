@@ -32,7 +32,7 @@ class I2pdService : Service() {
         private const val TAG = "I2pdService"
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "i2pd_foreground"
-        private const val WAKELOCK_TIMEOUT_MS = 30 * 60 * 1000L
+        private const val WAKELOCK_TAG = "Anonymous:I2pdWakeLock"
 
         @Volatile private var daemonStarted = false
 
@@ -81,7 +81,7 @@ class I2pdService : Service() {
         if (!daemonStarted) {
             daemonStarted = true
             serviceScope.launch {
-                startDaemon()
+                startDaemonWithRestart()
             }
         } else {
             Log.i(TAG, "Daemon already started in this process — skipping re-launch")
@@ -96,11 +96,11 @@ class I2pdService : Service() {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
-                "Anonymous:I2pdWakeLock"
+                WAKELOCK_TAG
             ).apply {
-                acquire(WAKELOCK_TIMEOUT_MS)
+                acquire()
             }
-            Log.i(TAG, "WakeLock acquired (timeout=${WAKELOCK_TIMEOUT_MS / 6000}min)")
+            Log.i(TAG, "WakeLock acquired (no timeout)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock: ${e.message}")
         }
@@ -117,23 +117,49 @@ class I2pdService : Service() {
         }
     }
 
-    private suspend fun startDaemon() {
-        Log.i(TAG, "Starting I2P daemon from within service process")
-        val daemon = I2pdDaemon.getInstance(applicationContext)
-        val started = daemon.start()
-        if (started) {
-            Log.i(TAG, "I2P daemon started successfully")
-        } else {
-            Log.e(TAG, "Failed to start I2P daemon")
+    private suspend fun startDaemonWithRestart() {
+        var restartDelayMs = 5_000L
+        while (serviceScope.isActive) {
+            Log.i(TAG, "Starting I2P daemon from within service process")
+            try {
+                val daemon = I2pdDaemon.getInstance(applicationContext)
+                val started = daemon.start()
+                if (started) {
+                    Log.i(TAG, "I2P daemon started successfully")
+                } else {
+                    Log.e(TAG, "I2P daemon start() returned false — will retry in ${restartDelayMs / 1000}s")
+                }
+            } catch (e: CancellationException) {
+                Log.i(TAG, "Daemon coroutine cancelled — not restarting")
+                break
+            } catch (e: Exception) {
+                Log.e(TAG, "Daemon threw exception: ${e.message} — will retry in ${restartDelayMs / 1000}s")
+            }
+
+            daemonStarted = false
+            Log.w(TAG, "Daemon exited. Restarting in ${restartDelayMs / 1000}s...")
+
+            try {
+                delay(restartDelayMs)
+            } catch (e: CancellationException) {
+                Log.i(TAG, "Delay cancelled — exiting restart loop")
+                break
+            }
+
+            // Cap backoff at 2 minutes
+            restartDelayMs = minOf(restartDelayMs * 2, 120_000L)
+
+            daemonStarted = true
         }
+        daemonStarted = false
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
-        Log.i(TAG, "I2pdService onDestroy — NOT stopping daemon (intentional)")
-        serviceScope.cancel()
+        Log.i(TAG, "I2pdService onDestroy — NOT stopping native daemon (intentional)")
         releaseWakeLock()
+        serviceScope.cancel()
         super.onDestroy()
     }
 
