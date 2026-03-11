@@ -30,6 +30,7 @@ class SAMClient private constructor() {
         private const val SAM_PORT = 7656
         private const val SAM_VERSION = "3.1"
         private const val SIGNATURE_TYPE = "7"
+        private const val HANDSHAKE_TIMEOUT_MS = 30_000
 
         @Volatile
         private var instance: SAMClient? = null
@@ -46,9 +47,6 @@ class SAMClient private constructor() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessionCounter = AtomicInteger(0)
     private val activeSessions = ConcurrentHashMap<String, SAMSession>()
-    private var controlSocket: Socket? = null
-    private var controlReader: BufferedReader? = null
-    private var controlWriter: PrintWriter? = null
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
 
@@ -57,7 +55,9 @@ class SAMClient private constructor() {
         val destination: String,
         val b32Address: String,
         val style: SessionStyle,
-        val socket: Socket? = null
+        val sessionSocket: Socket,
+        val sessionReader: BufferedReader,
+        val sessionWriter: PrintWriter
     )
 
     enum class SessionStyle {
@@ -68,113 +68,106 @@ class SAMClient private constructor() {
 
     suspend fun connect(): Boolean = withContext(Dispatchers.IO) {
         try {
-            if (_isConnected.value && controlSocket?.isConnected == true) {
-                Log.d(TAG, "Already connected, reusing connection")
-                return@withContext true
-            }
-
-            controlSocket = Socket(SAM_HOST, SAM_PORT)
-
-            controlReader = BufferedReader(InputStreamReader(controlSocket!!.getInputStream()))
-            controlWriter = PrintWriter(OutputStreamWriter(controlSocket!!.getOutputStream()), true)
-
-            if (!helloHandshake()) {
-                disconnect()
-                return@withContext false
-            }
-
-            _isConnected.value = true
-            Log.i(TAG, "Connected to SAM bridge")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to connect to SAM", e)
-            false
-        }
-    }
-
-    private fun helloHandshake(): Boolean {
-        return try {
-            sendCommand("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
-            val response = readResponse()
-
-            if (response.startsWith("HELLO REPLY RESULT=OK")) {
-                Log.d(TAG, "SAM handshake successful: $response")
+            val ok = openUtilityConnection { _, _ ->
                 true
-            } else {
-                Log.e(TAG, "SAM handshake failed: $response")
-                false
             }
+            _isConnected.value = ok
+            if (ok) Log.i(TAG, "SAM bridge reachable")
+            ok
         } catch (e: Exception) {
-            Log.e(TAG, "Handshake exception", e)
+            Log.e(TAG, "SAM bridge not reachable: ${e.message}")
+            _isConnected.value = false
             false
         }
     }
 
-    suspend fun createStreamSession(): Result<SAMSession> = withContext(Dispatchers.IO) {
-        try {
-            val sessionId = "stream_${sessionCounter.incrementAndGet()}_${System.currentTimeMillis()}"
-
-            sendCommand("SESSION CREATE STYLE=STREAM ID=$sessionId DESTINATION=TRANSIENT SIGNATURE_TYPE=$SIGNATURE_TYPE")
-
-            val response = readResponse()
-            Log.d(TAG, "SESSION CREATE response: $response")
-
-            if (response.startsWith("SESSION STATUS RESULT=OK")) {
-                val destination = extractValue(response, "DESTINATION")
-                    ?: return@withContext Result.failure(Exception("No destination in response"))
-
-                val b32Address = destinationToB32(destination)
-
-                val session = SAMSession(
-                    id = sessionId,
-                    destination = destination,
-                    b32Address = b32Address,
-                    style = SessionStyle.STREAM
-                )
-
-                activeSessions[sessionId] = session
-                Log.i(TAG, "Created STREAM session: $sessionId, b32: $b32Address")
-
-                Result.success(session)
-            } else {
-                Result.failure(Exception("SESSION CREATE failed: $response"))
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create session", e)
-            Result.failure(e)
-        }
+    suspend fun createStreamSession(savedPrivateKey: String? = null): Result<SAMSession> = withContext(Dispatchers.IO) {
+        createSessionInternal(
+            style = "STREAM",
+            sessionStyle = SessionStyle.STREAM,
+            savedPrivateKey = savedPrivateKey,
+            extraParams = ""
+        )
     }
 
     suspend fun createDatagramSession(forwardPort: Int = 0): Result<SAMSession> = withContext(Dispatchers.IO) {
+        val extra = if (forwardPort > 0) " PORT=$forwardPort" else ""
+        createSessionInternal(
+            style = "DATAGRAM",
+            sessionStyle = SessionStyle.DATAGRAM,
+            savedPrivateKey = null,
+            extraParams = extra
+        )
+    }
+
+    private fun createSessionInternal(style: String, sessionStyle: SessionStyle, savedPrivateKey: String?, extraParams: String): Result<SAMSession> {
+        val sessionSocket: Socket
+        val reader: BufferedReader
+        val writer: PrintWriter
+
         try {
-            val sessionId = "dgram_${sessionCounter.incrementAndGet()}_${System.currentTimeMillis()}"
-
-            val portCmd = if (forwardPort > 0) " PORT=$forwardPort" else ""
-            sendCommand("SESSION CREATE STYLE=DATAGRAM ID=$sessionId DESTINATION=TRANSIENT SIGNATURE_TYPE=$SIGNATURE_TYPE$portCmd")
-
-            val response = readResponse()
-
-            if (response.startsWith("SESSION STATUS RESULT=OK")) {
-                val destination = extractValue(response, "DESTINATION")
-                    ?: return@withContext Result.failure(Exception("No destination in response"))
-
-                val b32Address = destinationToB32(destination)
-
-                val session = SAMSession(
-                    id = sessionId,
-                    destination = destination,
-                    b32Address = b32Address,
-                    style = SessionStyle.DATAGRAM
-                )
-
-                activeSessions[sessionId] = session
-                Log.i(TAG, "Created DATAGRAM session: $sessionId")
-
-                Result.success(session)
-            } else {
-                Result.failure(Exception("SESSION CREATE failed: $response"))
-            }
+            sessionSocket = Socket(SAM_HOST, SAM_PORT)
+            sessionSocket.soTimeout = HANDSHAKE_TIMEOUT_MS
+            reader = BufferedReader(InputStreamReader(sessionSocket.getInputStream()))
+            writer = PrintWriter(OutputStreamWriter(sessionSocket.getOutputStream()), true)
         } catch (e: Exception) {
+            Log.e(TAG, "Cannot open session socket: ${e.message}")
+            return Result.failure(e)
+        }
+
+        return try {
+            writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
+            val helloResp = reader.readLine()
+                ?: throw IOException("SAM closed during HELLO")
+            if (!helloResp.startsWith("HELLO REPLY RESULT=OK")) {
+                sessionSocket.close()
+                return Result.failure(Exception("HELLO failed: $helloResp"))
+            }
+
+            val sessionId = "${style.lowercase()}_${sessionCounter.incrementAndGet()}_${System.currentTimeMillis()}"
+            val destination = savedPrivateKey ?: "TRANSIENT"
+            writer.println(
+                "SESSION CREATE STYLE=$style ID=$sessionId " +
+                        "DESTINATION=$destination SIGNATURE_TYPE=$SIGNATURE_TYPE$extraParams"
+            )
+
+            val response = reader.readLine()
+                ?: throw IOException("SAM closed during SESSION CREATE")
+            Log.d(TAG, "SESSION CREATE response: $response")
+
+            if (!response.startsWith("SESSION STATUS RESULT=OK")) {
+                sessionSocket.close()
+                return Result.failure(Exception("SESSION CREATE failed: $response"))
+            }
+
+            sessionSocket.soTimeout = 0
+
+            val returnedDestination = extractValue(response, "DESTINATION")
+                ?: run {
+                    sessionSocket.close()
+                    return Result.failure(Exception("No DESTINATION in SESSION STATUS"))
+                }
+
+            val b32Address = destinationToB32(returnedDestination)
+
+            val session = SAMSession(
+                id = sessionId,
+                destination = returnedDestination,
+                b32Address = b32Address,
+                style = sessionStyle,
+                sessionSocket = sessionSocket,
+                sessionReader = reader,
+                sessionWriter = writer
+            )
+
+            activeSessions[sessionId] = session
+            Log.i(TAG, "Created $style session: $sessionId b32: $b32Address")
+            Result.success(session)
+        } catch (e : Exception) {
+            try {
+                sessionSocket.close()
+            } catch (_ : Exception) {}
+            Log.e(TAG, "Failed to create $style session: ${e.message}")
             Result.failure(e)
         }
     }
@@ -182,7 +175,7 @@ class SAMClient private constructor() {
     suspend fun connectToPeer(sessionId: String, peerB32: String): Result<Socket> = withContext(Dispatchers.IO) {
         try {
             val connSocket = Socket(SAM_HOST, SAM_PORT)
-            connSocket.soTimeout = 60000
+            connSocket.soTimeout = 30_000
 
             val reader = BufferedReader(InputStreamReader(connSocket.getInputStream()))
             val writer = PrintWriter(OutputStreamWriter(connSocket.getOutputStream()), true)
@@ -197,12 +190,16 @@ class SAMClient private constructor() {
             writer.println("STREAM CONNECT ID=$sessionId DESTINATION=$peerB32 SILENT=false")
             val connectResp = reader.readLine()
 
-            if (connectResp.startsWith("STREAM STATUS RESULT=OK")) {
-                Result.success(connSocket)
-            } else {
+            if (connectResp == null || !connectResp.startsWith("STREAM STATUS RESULT=OK")) {
                 connSocket.close()
-                Result.failure(Exception("STREAM CONNECT failed: $connectResp"))
+                return@withContext Result.failure(
+                    Exception("STREAM CONNECT failed: $connectResp")
+                )
             }
+
+            connSocket.soTimeout = 0
+            Log.i(TAG, "STREAM CONNECT to $peerB32 OK")
+            Result.success(connSocket)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -226,15 +223,18 @@ class SAMClient private constructor() {
             writer.println("STREAM ACCEPT ID=$sessionId SILENT=false")
             val acceptResp = reader.readLine()
 
-            if (acceptResp.startsWith("STREAM STATUS RESULT=OK")) {
-                val peerDest = reader.readLine()
-                Log.i(TAG, "Accepted connection from: $peerDest")
-                Result.success(Pair(acceptSocket, peerDest))
-            } else {
+            if (acceptResp == null || !acceptResp.startsWith("STREAM STATUS RESULT=OK")) {
                 acceptSocket.close()
-                Result.failure(Exception("STREAM ACCEPT failed: $acceptResp"))
+                return@withContext Result.failure(Exception("STREAM ACCEPT failed: $acceptResp"))
             }
+
+            val peerDest = reader.readLine()
+                ?: throw IOException("Connection closed before peer dest line")
+
+            Log.i(TAG, "Accepted connection from: ${peerDest.take(30)}...")
+            Result.success(Pair(acceptSocket, peerDest))
         } catch (e: Exception) {
+            Log.e(TAG, "acceptConnection($sessionId) failed: ${e.message}")
             Result.failure(e)
         }
     }
@@ -274,18 +274,18 @@ class SAMClient private constructor() {
 
     suspend fun namingLookup(name: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            sendCommand("NAMING LOOKUP NAME=$name")
-            val response = readResponse()
+            openUtilityConnection { reader, writer ->
+                writer.println("NAMING LOOKUP NAME=$name")
+                val response = reader.readLine() ?: throw IOException("Connection closed")
+                Log.d(TAG, "NAMING LOOKUP <- $response")
 
-            if (response.startsWith("NAMING REPLY RESULT=OK")) {
-                val destination = extractValue(response, "VALUE")
-                if (destination != null) {
-                    Result.success(destination)
+                if (response.startsWith("NAMING REPLY RESULT=OK")) {
+                    val value = extractValue(response, "VALUE")
+                        ?: throw Exception("No VALUE in NAMING REPLY")
+                    Result.success(value)
                 } else {
-                    Result.failure(Exception("NO VALUE in response"))
+                    Result.failure(Exception("Lookup failed: $response"))
                 }
-            } else {
-                Result.failure(Exception("Lookup failed: $response"))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -294,41 +294,54 @@ class SAMClient private constructor() {
 
     suspend fun generateDestination(): Result<Pair<String, String>> = withContext(Dispatchers.IO) {
         try {
-            sendCommand("DEST GENERATE SIGNATURE_TYPE=$SIGNATURE_TYPE")
-            val response = readResponse()
+            openUtilityConnection { reader, writer ->
+                writer.println("DEST GENERATE SIGNATURE_TYPE=$SIGNATURE_TYPE")
+                val response = reader.readLine() ?: throw IOException("Connetion closed")
+                Log.d(TAG, "DEST GENERATE <- $response")
 
-            if (response.startsWith("DEST REPLY")) {
-                val pub = extractValue(response, "PUB")
-                val priv = extractValue(response, "PRIV")
-
-                if (pub != null && priv != null) {
-                    Result.success(Pair(pub, priv))
-                } else {
-                    Result.failure(Exception("Incomplete DEST REPLY"))
+                if (!response.startsWith("DEST REPLY")) {
+                    return@openUtilityConnection Result.failure(
+                        Exception("DEST GENERATE failed: $response")
+                    )
                 }
-            } else {
-                Result.failure(Exception("DEST GENERATE failed: $response"))
+
+                val public = extractValue(response, "PUB")
+                val private = extractValue(response, "PRIV")
+
+                if (public != null && private != null) {
+                    Result.success(Pair(public, private))
+                } else {
+                    Result.failure(Exception("Incomplete DEST REPLY: $response"))
+                }
             }
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
 
-    fun removeSession(sessionId: String) {
-        activeSessions.remove(sessionId)
-    }
+    // SESSION MANAGEMENT
 
     fun getActiveSessions(): List<SAMSession> = activeSessions.values.toList()
 
-    fun disconnect() {
-        try {
-            controlSocket?.close()
-            activeSessions.clear()
-            _isConnected.value = false
-            Log.i(TAG, "Disconnected from SAM")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error disconnecting", e)
+    fun removeSession(sessionId: String) {
+        val session = activeSessions.remove(sessionId)
+        session?.let {
+            try {
+                it.sessionSocket.close()
+            } catch (e : Exception) {}
+            Log.d(TAG, "Removed and closed session $sessionId")
         }
+    }
+
+    fun disconnect() {
+        activeSessions.values.forEach { session ->
+            try {
+                session.sessionSocket.close()
+            } catch (e : Exception) {}
+        }
+        activeSessions.clear()
+        _isConnected.value = false
+        Log.i(TAG, "Disconnected - all sessions closed")
     }
 
     fun cleanup() {
@@ -336,15 +349,23 @@ class SAMClient private constructor() {
         scope.cancel()
     }
 
-    private fun sendCommand(command: String) {
-        controlWriter?.println(command)
-        Log.d(TAG, "SAM -> $command")
-    }
+    // HELPERS
 
-    private fun readResponse(): String {
-        val response = controlReader?.readLine() ?: throw IOException("Connection closed")
-        Log.d(TAG, "SAM <- $response")
-        return response
+    private fun <T> openUtilityConnection(block: (BufferedReader, PrintWriter) -> T): T {
+        Socket(SAM_HOST, SAM_PORT).use {socket ->
+            socket.soTimeout = 30_000
+            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream()), true)
+
+            writer.println("HELLO VERSION MIN=3.0 MAX=$SAM_VERSION")
+            val helloResponse = reader.readLine()
+                ?: throw IOException("SAM closed during utility HELLO")
+            if (!helloResponse.startsWith("HELLO REPLY RESULT=OK")) {
+                throw Exception("SAM HELLO failed: $helloResponse")
+            }
+
+            return block(reader, writer)
+        }
     }
 
     private fun extractValue(response: String, key: String): String? {
@@ -354,11 +375,19 @@ class SAMClient private constructor() {
 
     private fun destinationToB32(destination: String): String {
         val standardBase64 = destination.replace('-', '+').replace('~', '/')
-        val decoded = Base64.decode(standardBase64, Base64.DEFAULT)
-        val md = MessageDigest.getInstance("SHA-256")
-        val hash = md.digest(decoded)
-        val b32 = encodeBase32(hash)
-        return "$b32.b32.i2p"
+        val allBytes = Base64.decode(standardBase64, Base64.DEFAULT)
+        val pubBytes = extractPublicDestination(allBytes)
+        val hash = MessageDigest.getInstance("SHA-256").digest(pubBytes)
+        return "${encodeBase32(hash)}.b32.i2p"
+    }
+
+    private fun extractPublicDestination(keyBytes: ByteArray): ByteArray {
+        // Minimum size of a valid b32 destination: 387 bytes = 256(crypto) + 128(signing) + 3(cert header)
+        if (keyBytes.size <= 387) return keyBytes
+        val certLength = ((keyBytes[385].toInt() and 0xFF) shl 8) or (keyBytes[386].toInt() and 0xFF)
+        val totalDestSize = 387 + certLength
+        return if (keyBytes.size > totalDestSize) keyBytes.copyOfRange(0, totalDestSize)
+        else keyBytes
     }
 
     private fun encodeBase32(data: ByteArray): String {
