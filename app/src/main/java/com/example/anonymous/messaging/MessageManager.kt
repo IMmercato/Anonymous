@@ -23,7 +23,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -45,6 +44,10 @@ class MessageManager private constructor(context: Context) {
         private const val PROTOCOL_VERSION = 1
         private const val AES_IV_SIZE = 12
         private const val AES_TAG_SIZE = 16
+
+        private const val PREFS_NAME = "i2p_identity"
+        private const val KEY_PRIV = "sam_priv_key"
+        private const val KEY_PUB = "sam_pub_key"
 
         @Volatile
         private var instance: MessageManager? = null
@@ -121,6 +124,22 @@ class MessageManager private constructor(context: Context) {
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     /**
+     * Persistent I2P identity helpers
+     */
+    private suspend fun getPersistentDestination(): String? {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val savedPriv = prefs.getString(KEY_PRIV, null)
+
+        if (savedPriv != null) {
+            Log.i(TAG, "Reusing persisted I2P destination")
+            return savedPriv
+        }
+
+        Log.e(TAG, "SAM PRIVATE key missing from SharedPreferences - identity not yet registered or data was cleared")
+        return null
+    }
+
+    /**
      * Initialize MessageManager and start listening for incoming I2P connections (After I2pdDaemon is READY)
      */
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
@@ -129,17 +148,38 @@ class MessageManager private constructor(context: Context) {
 
             // SAM Connection check
             if (!samClient.connect()) {
-                throw IllegalStateException("Failed to connect to SAM bridge")
+                throw IllegalStateException("SAM bridge not reachable on 127.0.0.1:7656")
             }
 
-            // Create main STREAM session
-            val sessionResult = samClient.createStreamSession()
+            // Wait until I2P has built enough tunnels to register a LeaSet
+            val tunnelsReady = waitForTunnelsReady(timeoutMs = 300_000L)    // 5 min
+            if (!tunnelsReady) {
+                Log.e(TAG, "Timed out waiting for I2P tunnels - check internet connectivity")
+                _connectionState.value = ConnectionState.Error
+                return@withContext false
+            }
+
+            // Load saved PRIV key so the same b32 address is restored every launch
+            val savedPriv = getPersistentDestination()
+            if (savedPriv == null) {
+                Log.w(TAG, "No persistent SAM key found — has Registration been completed?")
+            }
+
+            // Create main STREAM session (stable identity when savedPrivate != null)
+            val sessionResult = samClient.createStreamSession(savedPrivateKey = savedPriv)
             if (sessionResult.isFailure) {
                 throw IllegalStateException("Failed to create SAM session: ${sessionResult.exceptionOrNull()?.message}")
             }
 
             val session = sessionResult.getOrThrow()
             serverSessionId = session.id
+
+            // Wait for LeaseSet
+            Log.i(TAG, "Session created (${session.b32Address}), waiting for LeaseSet to propagate...")
+            val leaseSetReady = waitForLeaseSetPropagation(session.b32Address, timeoutMs = 120_000L)
+            if (!leaseSetReady) {
+                Log.w(TAG, "LeaseSet may not be visible yet - peers might not reach you for a few minutes")
+            }
 
             // Save my I2P identity if not already saved
             saveMyI2PIdentity(session.b32Address, session.destination)
@@ -157,46 +197,128 @@ class MessageManager private constructor(context: Context) {
         }
     }
 
+    private suspend fun waitForTunnelsReady(timeoutMs: Long = 300_000L): Boolean = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var attempt = 0
+
+        Log.i(TAG, "Waiting for I2P tunnels to be ready (timeout ${timeoutMs / 1000}s)...")
+
+        while (System.currentTimeMillis() < deadline) {
+            attempt++
+            try {
+                val result = samClient.createStreamSession(savedPrivateKey = null)
+
+                if (result.isSuccess) {
+                    val probeSession = result.getOrThrow()
+
+                    samClient.removeSession(probeSession.id)
+
+                    Log.i(TAG, "I2P tunnels ready after $attempt attempts " + "(~${(System.currentTimeMillis() - (deadline - timeoutMs)) / 1000}s)")
+                    return@withContext true
+                } else {
+                    Log.d(TAG, "Tunnel probe attempt $attempt failed: " + "${result.exceptionOrNull()?.message} - retrying in 10s")
+                }
+            } catch (e : Exception) {
+                Log.d(TAG, "Tunnel probe attempt $attempt exception: ${e.message} - retrying in 10s")
+            }
+
+            delay(10_000L)  // 10s
+        }
+
+        Log.e(TAG, "waitForTunnelsReady timed out after ${timeoutMs / 1000}s")
+        false
+    }
+
+    private suspend fun waitForLeaseSetPropagation(b32: String, timeoutMs: Long): Boolean = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var attempt = 0
+        while (System.currentTimeMillis() < deadline) {
+            attempt++
+            val result = samClient.namingLookup(b32)
+            if (result.isSuccess) {
+                Log.i(TAG, "LeaseSet confirmed visible after $attempt attempts")
+                return@withContext true
+            }
+            Log.d(TAG, "LeaseSet not yet visible (attempt $attempt), retrying in 10s...")
+            delay(10_000)   // 10s
+        }
+        false
+    }
+
     fun startListening(sessionId: String) {
+        if (serverSessionId == sessionId && _connectionState.value == ConnectionState.Connected) {
+            Log.i(TAG, "Already listening on $sessionId - skipping duplicate")
+            return
+        }
         this.serverSessionId = sessionId
+        _connectionState.value = ConnectionState.Connected
 
         scope.launch {
             Log.i(TAG, "Starting to listen for incoming I2P connections on session: $sessionId")
+
+            var backoffMs = 2_000L
+            var consecutiveFailures = 0
+            val maxConsecutiveFailures = 5
 
             while (isActive) {
                 try {
                     val result = samClient.acceptConnection(sessionId)
                     if (result.isSuccess) {
+                        backoffMs = 2_000L
+                        consecutiveFailures = 0
                         val (socket, peerDest) = result.getOrThrow()
                         Log.i(TAG, "Accepted incoming connection from: $peerDest")
                         handleIncomingConnection(socket, peerDest)
+                    } else {
+                        consecutiveFailures++
+                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${result.exceptionOrNull()?.message}")
+
+                        if (consecutiveFailures >= maxConsecutiveFailures) {
+                            Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures — i2pd restarted. Triggering recovery.")
+                            samClient.removeSession(sessionId)
+                            _connectionState.value = ConnectionState.Error
+                            break
+                        }
+
+                        delay(backoffMs)
+                        backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 } catch (e: Exception) {
                     if (e !is CancellationException) {
-                        Log.e(TAG, "Error accepting connection", e)
-                        delay(1000)
+                        consecutiveFailures++
+                        Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+
+                        if (consecutiveFailures >= maxConsecutiveFailures) {
+                            Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures. Triggering recovery.")
+                            samClient.removeSession(sessionId)
+                            _connectionState.value = ConnectionState.Error
+                            break
+                        }
+
+                        delay(backoffMs)
+                        backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 }
             }
         }
     }
 
-    suspend fun sendMessage(contactB32: String, text: String, replyToId: String? = null): Result<Message> {
-        return try {
+    suspend fun sendMessage(contactB32: String, text: String, replyToId: String? = null): Result<Message> = withContext(Dispatchers.IO) {
+        return@withContext try {
             val messageId = UUID.randomUUID().toString()
             _messageStatus.emit(MessageStatus(messageId, Status.SENDING))
 
             // I2P connection
-            val connection = getOrCreateConnection(contactB32) ?: return Result.failure(Exception("Could not establish I2P connection to $contactB32"))
+            val connection = getOrCreateConnection(contactB32) ?: return@withContext Result.failure(Exception("Could not establish I2P connection to $contactB32"))
 
             // I2P my identity
-            val myB32 = getMyB32Address() ?: return Result.failure(Exception("No I2P identity"))
+            val myB32 = getMyB32Address() ?: return@withContext Result.failure(Exception("No I2P identity"))
 
             // ECDH key pair
             val ephemeralKeyPair = cryptoManager.generateECDHKeyPair()
 
             // recipient's public key
-            val recipientPublicKey = getRecipientPublicKey(contactB32) ?: return Result.failure(Exception("No public key for contact $contactB32"))
+            val recipientPublicKey = getRecipientPublicKey(contactB32) ?: return@withContext Result.failure(Exception("No public key for contact $contactB32"))
 
             // Perform ECDH
             val sharedSecret = cryptoManager.performECDH(
@@ -278,7 +400,8 @@ class MessageManager private constructor(context: Context) {
         }
 
         try {
-            // Create new I2P connection via SAM
+            // Reuse the existing persistent session opened in initialize().
+            // Never re-supply savedPrivKey here — only initialize() owns that.
             val session = samClient.getActiveSessions().firstOrNull() ?: samClient.createStreamSession().getOrNull() ?: return@withContext null
 
             val socketResult = samClient.connectToPeer(session.id, contactB32)
@@ -338,17 +461,46 @@ class MessageManager private constructor(context: Context) {
      */
     private fun startAcceptingConnections(sessionId: String) {
         scope.launch {
+            var backoffMs = 2_000L
+            var consecutiveFailures = 0
+            val maxConsecutiveFailures = 5
+
             while (isActive) {
                 try {
                     val result = samClient.acceptConnection(sessionId)
                     if (result.isSuccess) {
+                        backoffMs = 2_000L
+                        consecutiveFailures = 0
                         val (socket, peerDest) = result.getOrThrow()
                         handleIncomingConnection(socket, peerDest)
+                    } else {
+                        consecutiveFailures++
+                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${result.exceptionOrNull()?.message}")
+
+                        if (consecutiveFailures >= maxConsecutiveFailures) {
+                            Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures. Triggering recovery.")
+                            samClient.removeSession(sessionId)
+                            _connectionState.value = ConnectionState.Error
+                            break
+                        }
+
+                        delay(backoffMs)
+                        backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 } catch (e: Exception) {
                     if (e !is CancellationException) {
-                        Log.e(TAG, "Error accepting connection", e)
-                        delay(1000)
+                        consecutiveFailures++
+                        Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+
+                        if (consecutiveFailures >= maxConsecutiveFailures) {
+                            Log.e(TAG, "Session $sessionId dead. Triggering recovery.")
+                            samClient.removeSession(sessionId)
+                            _connectionState.value = ConnectionState.Error
+                            break
+                        }
+
+                        delay(backoffMs)
+                        backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 }
             }
@@ -428,6 +580,20 @@ class MessageManager private constructor(context: Context) {
     private suspend fun processIncomingMessage(json: String, senderB32: String) {
         try {
             val networkMsg =gson.fromJson(json, NetworkMessage::class.java)
+
+            // Handle message type
+            when (networkMsg.type) {
+                "receipt" -> {
+                    Log.d(TAG, "Received read receipt for ${networkMsg.messageId} from $senderB32")
+                    _messageStatus.emit(MessageStatus(networkMsg.messageId, Status.READ))
+                    return
+                }
+                "text" -> {}
+                else -> {
+                    Log.w(TAG, "Unknown message type '${networkMsg.type}' - ignoring")
+                    return
+                }
+            }
 
             // Protocol Version
             if (networkMsg.v != PROTOCOL_VERSION) {
@@ -551,29 +717,15 @@ class MessageManager private constructor(context: Context) {
     }
 
     private fun getRecipientPublicKey(b32Address: String): PublicKey? {
-        // Check  contact
-        val contact = runBlocking { contactRepository.getContactByB32(b32Address) }
-
-        // Try from contact storage
-        val storeKey = cryptoManager.getContactPublicKey(context, b32Address)
-        if (storeKey != null) return storeKey
-
-        // decode publickey if string
-        contact?.publicKey?.let { pubKeyStr ->
-            return try {
-                val pubKeyBytes = Base64.decode(pubKeyStr, Base64.NO_WRAP)
-                decodeECPublicKey(pubKeyBytes)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to decode contact public key", e)
-                null
-            }
+        val key = cryptoManager.getContactPublicKey(context, b32Address)
+        if (key == null) {
+            Log.e(TAG, "No EC public key for $b32Address - contact must reshare QR")
         }
-        return null
+        return key
     }
 
     private fun getMyKeyPair(): KeyPair? {
-        val myUserId = contactRepository.getMyIdentity()?.b32Address ?: return null
-        return cryptoManager.getKeyPair(context, myUserId, isOwnKey = true)
+        return cryptoManager.getOrCreateOwnKeyPair(context)
     }
 
     private fun decodeECPublicKey(bytes: ByteArray): PublicKey {

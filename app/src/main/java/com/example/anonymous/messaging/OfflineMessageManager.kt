@@ -25,8 +25,8 @@ import java.util.UUID
 class OfflineMessageManager private constructor(context: Context) {
     companion object {
         private const val TAG = "OfflineMessageManager"
-        private const val MAX_RETRIES = 5
-        private val RETRY_DELAYS = listOf(30_000L, 60_000L, 120_000L, 300_000L, 600_000L)        // 30s-10min
+        private const val MAX_RETRIES = 12
+        private val RETRY_DELAYS = listOf(30_000L, 60_000L, 120_000L, 300_000L, 600_000L, 600_000L, 600_000L, 600_000L, 600_000L, 600_000L, 600_000L, 600_000L)        // 30s-10min
 
         @Volatile
         private var instance: OfflineMessageManager? = null
