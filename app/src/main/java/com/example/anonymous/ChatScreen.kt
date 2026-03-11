@@ -66,17 +66,18 @@ import androidx.compose.ui.unit.sp
 import com.example.anonymous.datastore.ChatCustomizationSettings
 import com.example.anonymous.i2p.I2pdDaemon
 import com.example.anonymous.messaging.MessageManager
-import com.example.anonymous.network.GraphQLCryptoService
+import com.example.anonymous.messaging.OfflineMessageManager
 import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.ContactRepository
-import com.example.anonymous.repository.MessageRepository
 import com.example.anonymous.utils.PrefsHelper
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.runtime.collectAsState
-import com.example.anonymous.messaging.OfflineMessageManager
+import com.example.anonymous.repository.MessageRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 sealed class IconType(val action: (String) -> String) {
     data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
@@ -105,8 +106,12 @@ fun ChatScreen(
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
-    var connectionStatus by remember {
-        mutableStateOf<I2pdDaemon.DaemonState>(I2pdDaemon.DaemonState.STOPPED)
+    val connectionState by messageManager.connectionState.collectAsState()
+    val connectionStatus = when (connectionState) {
+        MessageManager.ConnectionState.Connected -> I2pdDaemon.DaemonState.Ready
+        MessageManager.ConnectionState.Connecting -> I2pdDaemon.DaemonState.Starting
+        MessageManager.ConnectionState.Error -> I2pdDaemon.DaemonState.Error("Session error", false)
+        MessageManager.ConnectionState.Disconnected -> I2pdDaemon.DaemonState.Idle
     }
     var isInitializing by remember { mutableStateOf(false) }
 
@@ -123,52 +128,22 @@ fun ChatScreen(
         })
     )
 
-    // Initialize I2P daemon and messaging
-    LaunchedEffect(Unit) {
-        if (!i2pdDaemon.isRunning() && !isInitializing) {
-            isInitializing = true
-            i2pdDaemon.start()
-        }
-
-        i2pdDaemon.addListener(object : I2pdDaemon.DaemonStateListener {
-            override fun onStateChanged(state: I2pdDaemon.DaemonState) {
-                connectionStatus = state
-                if (state == I2pdDaemon.DaemonState.READY) {
-                    coroutineScope.launch {
-                        val success = messageManager.initialize()
-                        if (success) {
-                            Log.i("ChatScreen", "MessageManger initialized successfully")
-                        } else {
-                            Log.e("ChatScreen", "Failed to initialize MessageManager")
-                        }
-                    }
-                }
-            }
-
-            override fun onError(error: String) {
-                Log.e("ChatScreen", "I2P Error: $error")
-                connectionStatus = I2pdDaemon.DaemonState.ERROR
-            }
-        })
-    }
-
     // Load messages on start
     LaunchedEffect(contactId) {
-        val cryptoService = GraphQLCryptoService(context)
-        val localMessagesDecrypted = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
-        messages = localMessagesDecrypted
+        val stored = withContext(Dispatchers.IO) {
+            messageRepository.getMessagesForContact(contactId)
+        }
+        messages = stored
     }
 
     // Listen for incoming I2P messages
     LaunchedEffect(messageManager) {
         messageManager.incomingMessages.collect { newMessage ->
-            try {
-                messageRepository.addMessage(newMessage)
-                val cryptoService = GraphQLCryptoService(context)
-                val updatedMessages = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
-                messages = updatedMessages
-            } catch (e: Exception) {
-                Log.e("ChatScreen", "Error processing new message", e)
+            if (newMessage.senderId == contactId || newMessage.receiverId == contactId) {
+                val updated = withContext(Dispatchers.IO) {
+                    messageRepository.getMessagesForContact(contactId)
+                }
+                messages = updated
             }
         }
     }
@@ -176,32 +151,34 @@ fun ChatScreen(
     // Listen for message status updates
     LaunchedEffect(messageManager) {
         messageManager.messageStatus.collect { status ->
-            Log.d("ChatScreen", "Message ${status.messageId} status: ${status.status}")
-        }
-    }
-
-    // Cleanup on exit
-    DisposableEffect(Unit) {
-        onDispose {
-            Log.d("ChatScreen", "Leaving chat with $contactId")
+            if (status.status == MessageManager.Status.SENT || status.status == MessageManager.Status.DELIVERED) {
+                val updated = withContext(Dispatchers.IO) {
+                    messageRepository.getMessagesForContact(contactId)
+                }
+                messages = updated
+            }
         }
     }
 
     @Composable
     fun getConnectionStatusText(): Pair<String, Color> {
         return when (connectionStatus) {
-            I2pdDaemon.DaemonState.STOPPED -> "I2P Stopped" to Color.Gray
-            I2pdDaemon.DaemonState.STARTING -> "Starting I2P..." to Color.Yellow
-            I2pdDaemon.DaemonState.WAITING_FOR_NETWORK -> "Waiting for network..." to Color.Yellow
-            I2pdDaemon.DaemonState.BUILDING_TUNNELS -> "Building tunnels..." to Color.Yellow
-            I2pdDaemon.DaemonState.READY -> {
+            I2pdDaemon.DaemonState.Idle -> "I2P Idle" to Color.Gray
+            I2pdDaemon.DaemonState.Starting -> "Starting I2P..." to Color.Yellow
+            I2pdDaemon.DaemonState.WaitingForNetwork -> "Waiting for network..." to Color.Yellow
+            I2pdDaemon.DaemonState.BuildingTunnels -> "Building tunnels..." to Color.Yellow
+            I2pdDaemon.DaemonState.Ready -> {
                 if (messageManager.connectionState.collectAsState().value == MessageManager.ConnectionState.Connected) {
                     "Connected (I2P)" to Color.Green
                 } else {
                     "Connecting..." to Color.Yellow
                 }
             }
-            I2pdDaemon.DaemonState.ERROR -> "I2P Error" to Color.Red
+            is I2pdDaemon.DaemonState.Error -> {
+                val isPermanent = (connectionStatus as? I2pdDaemon.DaemonState.Error)?.isPermanent ?: false
+                if (isPermanent) "I2P Error (Permanent)" to Color.Red else "I2P Error" to Color.Red
+            }
+            I2pdDaemon.DaemonState.Reseeding -> "RESEEDING" to Color.Yellow
         }
     }
 
@@ -337,14 +314,15 @@ fun ChatScreen(
                                             val result = messageManager.sendMessage(contactId, message)
 
                                             if (result.isSuccess) {
-                                                val cryptoService = GraphQLCryptoService(context)
-                                                val updatedMessages = messageRepository.getMessagesForContactDecrypted(contactId, cryptoService)
-                                                messages = updatedMessages
+                                                val updated = withContext(Dispatchers.IO) {
+                                                    messageRepository.getMessagesForContact(contactId)
+                                                }
+                                                messages = updated
                                                 message = ""
                                                 isCodeFormat = false
                                                 Log.d("ChatScreen", "Message sent successfully via I2P")
                                             } else {
-                                                Log.w("ChatScreen", "I2P sen failed, queuing for offline: ${result.exceptionOrNull()?.message}")
+                                                Log.w("ChatScreen", "I2P send failed, queuing for offline: ${result.exceptionOrNull()?.message}")
                                                 val queuedId = offlineManager.queueMessage(contactId, message)
                                                 Log.d("ChatScreen", "Message queued for offline delivery: $queuedId")
                                                 message = ""
