@@ -1,5 +1,10 @@
 package com.example.anonymous
 
+import android.R
+import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.widget.Toast
@@ -7,16 +12,23 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -25,15 +37,19 @@ import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import coil.request.Disposable
 import coil.request.ImageRequest
+import com.example.anonymous.community.CommunityInvite
+import com.example.anonymous.community.CommunityMemberClient
 import com.example.anonymous.datastore.CommunityCustomizationSettings
-
-// A simple data class representing a community.
-data class CommunityInfo(
-    val name: String,
-    val description: String,
-    val members: Int
-)
+import com.example.anonymous.network.model.Community
+import com.example.anonymous.network.model.CommunityMessage
+import com.example.anonymous.repository.CommunityRepository
+import com.example.anonymous.repository.ContactRepository
+import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 // Simple model for a Post.
 data class Post(
@@ -41,19 +57,51 @@ data class Post(
     val mediaUrl: String? = null
 )
 
-// Updated CommunityScreen that takes a customization parameter.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CommunityScreen(
-    community: CommunityInfo,
+    community: Community,
     onBack: () -> Unit,
     customization: CommunityCustomizationSettings
 ) {
-    var postText by remember { mutableStateOf("") }
-    var selectedMediaUri by remember { mutableStateOf<Uri?>(null) }
-    var showPostDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val communityRepo = remember { CommunityRepository.getInstance(context) }
+    val contactRepo = remember { ContactRepository.getInstance(context) }
+
+    val myB32 = remember { contactRepo.getMyIdentity()?.b32Address ?: "" }
+    val myName = remember { if (myB32.isNotEmpty()) myB32.take(12) else "Unknown" }
+
+    val messages by communityRepo.getMessagesFlow(community.b32Address).collectAsState(initial = emptyList())
+
+    var messageText by remember { mutableStateOf("") }
+    var isConnected by remember { mutableStateOf(false) }
+    var showShareDialog by remember { mutableStateOf(false) }
+    var isSending by remember { mutableStateOf(false) }
+
+    val listState = rememberLazyListState()
+
+    // Create client once
+    val client = remember {
+        CommunityMemberClient(
+            community = community,
+            myB32 = myB32,
+            myName = myName,
+            onMessage = { msg: CommunityMessage ->
+                coroutineScope.launch {
+                    coroutineScope.launch {
+                        communityRepo.addMessage(msg)
+                    }
+                }
+            },
+            onConnectionStateChanged = { connected ->
+                isConnected = connected
+            }
+        )
+    }
 
     // For demo purposes, we pre-add some posts.
+    /*
     val posts = remember {
         mutableStateListOf<Post>().apply {
             add(
@@ -71,8 +119,6 @@ fun CommunityScreen(
             )
         }
     }
-
-    val context = LocalContext.current
     // Build an ImageLoader that supports GIFs.
     val gifEnabledLoader = remember {
         ImageLoader.Builder(context)
@@ -85,173 +131,238 @@ fun CommunityScreen(
             }
             .build()
     }
+     */
 
-    val mediaPickerLauncher = rememberLauncherForActivityResult(contract = GetContent()) { uri: Uri? ->
-        selectedMediaUri = uri
+    // Start connection
+    DisposableEffect(community.b32Address) {
+        client.connect()
+        onDispose { client.disconnect() }
     }
 
-    val listState = rememberLazyListState()
+    // Scroll to bottom on new message
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size - 1)
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(community.name) },
+                title = {
+                    Column {
+                        Text(community.name)
+                        Text(
+                            text = if (isConnected) "Connected" else "Connecting...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isConnected) Color(0xFF4CAF50) else Color(0xFFFFC107)
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    IconButton(onClick = { showShareDialog = true }) {
+                        Icon(Icons.Default.Share, contentDescription = "Share Invite")
+                    }
                 }
             )
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showPostDialog = true },
-                modifier = Modifier.padding(bottom = 16.dp, end = 16.dp)
-            ) {
-                Icon(Icons.Rounded.Add, contentDescription = "New Post!")
-            }
         }
     ) { innerPadding ->
-        Box(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .imePadding()
+        ) {
             LazyColumn(
                 state = listState,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(horizontal = 16.dp),
-                contentPadding = PaddingValues(vertical = 16.dp)
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Sticky header for community info.
-                stickyHeader {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surface)
-                            .padding(16.dp)
-                    ) {
-                        Text(
-                            text = community.description,
-                            style = MaterialTheme.typography.bodyLarge,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Members: ${community.members}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
+                items(messages, key = { it.id }) { msg->
+                    CommunityMessageBubble(
+                        message = msg,
+                        isOwn = msg.senderB32 == myB32,
+                        bubbleColor = customization.postCardColor,
+                        textSize = customization.textSize
+                    )
                 }
-                // List of posts.
-                items(posts) { post ->
-                    Card(
+            }
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(8.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BasicTextField(
+                        value = messageText,
+                        onValueChange = { messageText = it },
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .clickable { /* Optionally handle post clicks */ },
-                        colors = CardDefaults.elevatedCardColors(
-                            containerColor = customization.postCardColor
-                        ),
-                        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                    ) {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            // Only show images if showImages is true.
-                            if (customization.showImages) {
-                                post.mediaUrl?.let { url ->
-                                    AsyncImage(
-                                        model = ImageRequest.Builder(context)
-                                            .data(url)
-                                            .crossfade(true)
-                                            .build(),
-                                        imageLoader = gifEnabledLoader,
-                                        contentDescription = "Post media",
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .height(200.dp),
-                                        contentScale = ContentScale.Crop
-                                    )
+                            .weight(1f)
+                            .padding(4.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                        decorationBox = { inner ->
+                            Box {
+                                if (messageText.isEmpty()) {
+                                    Text("Message ${community.name}...", style = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant))
                                 }
+                                inner()
                             }
-                            Text(
-                                text = post.text,
-                                modifier = Modifier.padding(16.dp),
-                                fontSize = customization.textSize.sp,
-                                style = MaterialTheme.typography.bodyLarge
-                            )
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    IconButton(
+                        onClick = {
+                            val text = messageText.trim()
+                            if (text.isNotEmpty() && !isSending) {
+                                isSending = true
+                                client.sendMessage(text)
+
+                                coroutineScope.launch {
+                                    communityRepo.addMessage(
+                                        CommunityMessage(
+                                            id = "${myB32.take(8)}_${System.currentTimeMillis()}",
+                                            senderB32 = myB32,
+                                            senderName = myName,
+                                            content = text,
+                                            timestamp = System.currentTimeMillis(),
+                                            communityB32 = community.b32Address
+                                        )
+                                    )
+                                    isSending = false
+                                }
+                                messageText = ""
+                            }
+                        },
+                        enabled = messageText.isNotBlank() && !isSending
+                    ) {
+                        if (isSending) {
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        } else {
+                            Icon(Icons.Default.Send, contentDescription = "Send")
                         }
                     }
                 }
             }
-            // New post dialog.
-            if (showPostDialog) {
-                AlertDialog(
-                    onDismissRequest = {
-                        showPostDialog = false
-                        postText = ""
-                        selectedMediaUri = null
-                    },
-                    title = { Text("New Post") },
-                    text = {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            TextField(
-                                value = postText,
-                                onValueChange = { postText = it },
-                                label = { Text("Enter your post") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(
-                                onClick = { mediaPickerLauncher.launch("image/*") },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("Select Image")
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            selectedMediaUri?.let { uri ->
-                                AsyncImage(
-                                    model = uri,
-                                    contentDescription = "Selected image preview",
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(200.dp),
-                                    contentScale = ContentScale.Crop
-                                )
-                            }
-                        }
-                    },
-                    confirmButton = {
-                        TextButton(
-                            onClick = {
-                                if (postText.isNotBlank() || selectedMediaUri != null) {
-                                    posts.add(
-                                        Post(
-                                            text = postText,
-                                            mediaUrl = selectedMediaUri?.toString()
-                                        )
-                                    )
-                                    Toast.makeText(context, "Post Added!", Toast.LENGTH_SHORT).show()
-                                    postText = ""
-                                    selectedMediaUri = null
-                                    showPostDialog = false
-                                }
-                            }
-                        ) {
-                            Text("Post")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(
-                            onClick = {
-                                showPostDialog = false
-                                postText = ""
-                                selectedMediaUri = null
-                            }
-                        ) {
-                            Text("Cancel")
-                        }
+        }
+    }
+
+    if (showShareDialog) {
+        val invite = remember(community) { CommunityInvite.generateInviteUri(community) }
+
+        AlertDialog(
+            onDismissRequest = { showShareDialog = false },
+            title = {
+                Column {
+                    Text("Share this invite link with people you want to add:", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                       Text(
+                           text = invite,
+                           modifier = Modifier.padding(12.dp),
+                           style = MaterialTheme.typography.bodySmall,
+                           color = MaterialTheme.colorScheme.onSurfaceVariant
+                       )
                     }
+                    if (!community.isCreator) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Note: only the community creator should share invites.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Community Invite", invite))
+                        Toast.makeText(context, "Invite link copied!", Toast.LENGTH_SHORT).show()
+                        showShareDialog = false
+                    }
+                ) { Text("Copy Link") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showShareDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun CommunityMessageBubble(
+    message: CommunityMessage,
+    isOwn: Boolean,
+    bubbleColor: Color,
+    textSize: Int
+) {
+    val alignment = if (isOwn) Alignment.CenterEnd else Alignment.CenterStart
+    val ownBubble = MaterialTheme.colorScheme.primary
+    val color = if (isOwn) ownBubble else bubbleColor
+
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = alignment
+    ) {
+        Column(
+            modifier = Modifier.widthIn(max = 280.dp),
+            horizontalAlignment = if (isOwn) Alignment.End else Alignment.Start
+        ) {
+            if (!isOwn) {
+                Text(
+                    text = message.senderName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp)
                 )
+            }
+            Surface(
+                shape = RoundedCornerShape(
+                    topStart = 12.dp, topEnd = 12.dp,
+                    bottomStart = if (isOwn) 12.dp else 4.dp,
+                    bottomEnd = if (isOwn) 4.dp else 12.dp
+                ),
+                color = color,
+                shadowElevation = 2.dp
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text(
+                        text = message.content,
+                        fontSize = textSize.sp,
+                        color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp)),
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp),
+                        color = if (isOwn) MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f) else Color.Gray,
+                        modifier = Modifier.align(Alignment.End)
+                    )
+                }
             }
         }
     }
