@@ -55,6 +55,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.net.toUri
+import com.example.anonymous.network.model.Community
 
 class MainActivity : ComponentActivity() {
 
@@ -270,7 +271,7 @@ fun MainScreen(navController: NavHostController) {
 
     var connectionError by remember { mutableStateOf<String?>(null) }
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
-    var selectedCommunity by remember { mutableStateOf<CommunityInfo?>(null) }
+    var selectedCommunity by remember { mutableStateOf<Community?>(null) }
     var selectedTab = remember { mutableStateOf(Icons.Default.Home) }
     var showCustomHome by remember { mutableStateOf(false) }
     var showingAuthor by remember { mutableStateOf(false) }

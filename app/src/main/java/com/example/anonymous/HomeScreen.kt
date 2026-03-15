@@ -1,6 +1,8 @@
 package com.example.anonymous
 
+import android.widget.Toast
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,7 +18,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.anonymous.community.CommunityInvite
+import com.example.anonymous.community.createCommunity
+import com.example.anonymous.community.joinCommunity
+import com.example.anonymous.network.model.Community
 import com.example.anonymous.network.model.Contact
+import com.example.anonymous.repository.CommunityRepository
 import com.example.anonymous.repository.ContactRepository
 import kotlinx.coroutines.launch
 
@@ -24,23 +31,21 @@ import kotlinx.coroutines.launch
 fun HomeScreen(
     isCommunity: Boolean = false,
     onOpenChat: (Contact) -> Unit,
-    onOpenCommunity: (CommunityInfo) -> Unit
+    onOpenCommunity: (Community) -> Unit
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val contactRepository = remember { ContactRepository(context) }
-    val contacts by contactRepository.getContactsFlow().collectAsState(initial = emptyList())
+    val communityRepository = remember { CommunityRepository.getInstance(context) }
 
-    val communityList = remember {
-        listOf(
-            CommunityInfo("Anonymous", "Community for Anonymous thinkers.", 1500),
-            CommunityInfo("Science", "Discuss new discoveries.", 2350),
-            CommunityInfo("Hacking", "Cyber-security & hacking tips.", 980),
-            CommunityInfo("Building", "DIY enthusiasts hub.", 1200)
-        )
-    }
+    val contacts by contactRepository.getContactsFlow().collectAsState(initial = emptyList())
+    val communities by communityRepository.getCommunitiesFlow().collectAsState(initial = emptyList())
 
     var showNewContactDialog by remember { mutableStateOf(false) }
+    var showCreateCommunityDialog by remember { mutableStateOf(false) }
+    var showJoinCommunityDialog by remember { mutableStateOf(false) }
+    var showCommunityMenu by remember { mutableStateOf(false) }
+
     var showEditDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showReportDialog by remember { mutableStateOf(false) }
@@ -49,19 +54,31 @@ fun HomeScreen(
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(onClick = {
-                if (isCommunity) {
-                    // Handle community addition
-                } else {
-                    showNewContactDialog = true
+            Box {
+                FloatingActionButton(onClick = {
+                    if (isCommunity) showCommunityMenu = true
+                    else showNewContactDialog = true
+                }) {
+                    Icon(Icons.Default.Add, contentDescription = "Add")
                 }
-            }) {
-                Icon(Icons.Default.Add, contentDescription = "Add")
+                DropdownMenu(
+                    expanded = showCommunityMenu,
+                    onDismissRequest = { showCommunityMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Create Community") },
+                        onClick = { showCommunityMenu = false; showCreateCommunityDialog = true }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Join via Invite") },
+                        onClick = { showCommunityMenu = false; showJoinCommunityDialog = true }
+                    )
+                }
             }
         }
     ) { _ ->
         if (isCommunity) {
-            CommunityList(communities = emptyList(), onOpenCommunity = onOpenCommunity)
+            CommunityList(communities = communities, onOpenCommunity = onOpenCommunity)
         } else {
             ContactList(
                 contacts = contacts,
@@ -87,6 +104,58 @@ fun HomeScreen(
         NewContactDialog(
             onDismiss = { showNewContactDialog = false },
             onContactAdded = { /* Already handled by flow */ }
+        )
+    }
+
+    if (showCreateCommunityDialog) {
+        CreateCommunityDialog(
+            onDismiss = { showCreateCommunityDialog = false },
+            onCreate = {name ->
+                showCreateCommunityDialog = false
+                coroutineScope.launch {
+                    val result = createCommunity(context, name)
+                    if (result.isSuccess) {
+                        Toast.makeText(context, "Community created!", Toast.LENGTH_SHORT).show()
+                        onOpenCommunity(result.getOrThrow())
+                    } else {
+                        Toast.makeText(context, "Failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        )
+    }
+
+    if (showJoinCommunityDialog) {
+        JoinCommunityDialog(
+            onDismiss = { showJoinCommunityDialog = false },
+            onJoin = { invite ->
+                showJoinCommunityDialog = false
+                coroutineScope.launch {
+                    val parsed = CommunityInvite.parseInviteUri(invite)
+                    if (parsed == null) {
+                        Toast.makeText(context, "Invalid invite", Toast.LENGTH_SHORT).show()
+                        return@launch
+                    }
+                    val myB32 = contactRepository.getMyIdentity()?.b32Address ?: ""
+                    val myName = if (myB32.isNotEmpty()) myB32.take(12) else "Unknown"
+
+                    val result = joinCommunity(
+                        context = context,
+                        invite = parsed,
+                        myB32 = myB32,
+                        myName = myName,
+                        onMessage = { }
+                    )
+                    if (result.isSuccess) {
+                        val (community, tempClient) = result.getOrThrow()
+                        tempClient.disconnect()
+                        Toast.makeText(context, "Joined ${community.name}!", Toast.LENGTH_SHORT).show()
+                        onOpenCommunity(community)
+                    } else {
+                        Toast.makeText(context, "Join failed: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
         )
     }
 
@@ -173,10 +242,83 @@ fun HomeScreen(
 }
 
 @Composable
-private fun CommunityList(
-    communities: List<CommunityInfo>,
-    onOpenCommunity: (CommunityInfo) -> Unit
+private fun CreateCommunityDialog(
+    onDismiss: () -> Unit,
+    onCreate: (name: String) -> Unit
 ) {
+    var name by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Create Community") },
+        text = {
+            Column {
+                Text("Choose a name for your community. You will be the host.", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(12.dp))
+                TextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Community Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { if (name.isNotBlank()) onCreate(name.trim()) },
+                enabled = name.isNotBlank()
+            ) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun JoinCommunityDialog(
+    onDismiss: () -> Unit,
+    onJoin: (invite: String) -> Unit
+) {
+    var uri by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Join Community") },
+        text = {
+            Column {
+                Text("Scan the invite QR:", style = MaterialTheme.typography.bodyMedium)
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun CommunityList(
+    communities: List<Community>,
+    onOpenCommunity: (Community) -> Unit
+) {
+    if (communities.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("No communities yet", style = MaterialTheme.typography.bodyLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Tap + to create one or join via an invite.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
+            }
+        }
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -187,36 +329,36 @@ private fun CommunityList(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(150.dp)
-                    .clickable { onOpenCommunity(community) },
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onOpenCommunity(community) },
                 colors = CardDefaults.elevatedCardColors(
                     containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                 ),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
             ) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = community.name,
                             style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            textAlign = TextAlign.Center
+                            color = MaterialTheme.colorScheme.primary
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            text = community.description,
-                            style = MaterialTheme.typography.bodyLarge,
-                            textAlign = TextAlign.Center,
-                            color = MaterialTheme.colorScheme.onSurface
+                            text = community.b32Address.take(20) + "...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
+                    }
+                    if (community.isCreator) {
+                        Badge(containerColor = MaterialTheme.colorScheme.secondary) { Text("Host", fontSize = 10.sp) }
                     }
                 }
             }
@@ -232,6 +374,22 @@ private fun ContactList(
     onDeleteClick: (Contact) -> Unit,
     onReportClick: (Contact) -> Unit
 ) {
+    if (contacts.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("No Contacts yet", style = MaterialTheme.typography.bodyLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Tap + to add your friends.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 32.dp)
+                )
+            }
+        }
+        return
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -240,7 +398,10 @@ private fun ContactList(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onOpenChat(contact) }
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ) { onOpenChat(contact) }
                     .padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -301,98 +462,4 @@ private fun ContactList(
             }
         }
     }
-}
-
-@Composable
-private fun SimpleInputDialog(
-    title: String,
-    label: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            TextField(
-                value = value,
-                onValueChange = onValueChange,
-                label = { Text(label) }
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm) { Text("OK") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-private fun ColumnInputDialog(
-    title: String,
-    firstLabel: String,
-    firstValue: String,
-    onFirstChange: (String) -> Unit,
-    secondLabel: String,
-    secondValue: String,
-    onSecondChange: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column {
-                TextField(
-                    value = firstValue,
-                    onValueChange = onFirstChange,
-                    label = { Text(firstLabel) }
-                )
-                Spacer(Modifier.height(8.dp))
-                TextField(
-                    value = secondValue,
-                    onValueChange = onSecondChange,
-                    label = { Text(secondLabel) }
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Add") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
-
-@Composable
-private fun ConfirmDialog(
-    title: String,
-    text: String,
-    icon: (@Composable () -> Unit)? = null,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                icon?.invoke()
-                if (icon != null) Spacer(Modifier.width(8.dp))
-                Text(text)
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm) { Text("Yes") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("No") }
-        }
-    )
 }
