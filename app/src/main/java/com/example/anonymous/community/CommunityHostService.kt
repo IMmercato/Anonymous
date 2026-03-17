@@ -16,18 +16,20 @@ import androidx.core.app.NotificationCompat
 import com.example.anonymous.MainActivity
 import com.example.anonymous.R
 import com.example.anonymous.i2p.SAMClient
+import com.example.anonymous.media.MediaChunkManager
+import com.example.anonymous.media.MediaProtocol
+import com.example.anonymous.network.model.CommunityPacket
 import com.example.anonymous.repository.CommunityRepository
-import com.google.gson.Gson
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.net.Socket
 import java.io.BufferedWriter
@@ -50,6 +52,8 @@ class CommunityHostService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
+    private val json = Json { ignoreUnknownKeys = true }
+    private lateinit var mediaManager: MediaChunkManager
 
     companion object {
         private const val TAG = "CommunityHostService"
@@ -166,9 +170,7 @@ class CommunityHostService : Service() {
 
             var line: String?
             while (reader.readLine().also { line = it } != null) {
-                val packet = line!!
-                appendToReplayBuffer(packet)
-                fanOut(packet, excluding = member)
+                routePacket(line!!, from = member)
             }
         } catch (e : Exception) {
             Log.d(TAG, "Member socket closed: ${e.message}")
@@ -177,6 +179,66 @@ class CommunityHostService : Service() {
             runCatching { socket.close() }
             updateNotification("Hosting · ${activeMembers.size} members online")
             Log.i(TAG, "Member disconnected. Remaining: ${activeMembers.size}")
+        }
+    }
+
+    /**
+     * • MSG / MEDIA_META  → replay buffer + fan-out
+     * • MEDIA_CHUNK       → MediaChunkManager cache + fan-out (NO replay)
+     * • MEDIA_GET         → serve chunk from cache back to requesting member only
+     */
+    private fun routePacket(raw: String, from: MemberSocket) {
+        try {
+            val packet = json.decodeFromString<CommunityPacket>(raw)
+
+            when (packet.type) {
+                MediaProtocol.TYPE_MEDIA_META -> {
+                    packet.meta?.let { mediaManager.registerMeta(it) }
+                    appendToReplayBuffer(raw)       // meta is small - replay it
+                    fanOut(raw, excluding = from)
+                }
+
+                MediaProtocol.TYPE_MEDIA_CHUNK -> {
+                    val mediaId = packet.mediaId
+                    if (mediaId != null && packet.chunkIndex >= 0 && packet.chunkData.isNotEmpty()) {
+                        mediaManager.onChunkReceived(mediaId, packet.chunkIndex, packet.chunkData)
+                    }
+                    fanOut(raw, excluding = from)
+                }
+
+                MediaProtocol.TYPE_MEDIA_GET -> {
+                    val mediaId = packet.mediaId ?: return
+                    val index = packet.chunkIndex
+                    val chunkB64 = mediaManager.getChunk(mediaId, index)
+
+                    if (chunkB64 != null) {
+                        val response = json.encodeToString(
+                            CommunityPacket(
+                                type = MediaProtocol.TYPE_MEDIA_CHUNK,
+                                senderB32 = "host",
+                                mediaId = mediaId,
+                                chunkIndex = index,
+                                chunkData = chunkB64,
+                                timestamp = System.currentTimeMillis()
+                            )
+                        )
+                        try {
+                            from.writer.write(response)
+                            from.writer.newLine(); from.writer.flush()
+                        } catch (e : Exception) {
+                            Log.e(TAG, "Failed to serve chunk $index for $mediaId: ${e.message}")
+                        }
+                    } else {
+                        Log.w(TAG, "MEDIA_GET for $mediaId chunk $index - not in cache yet")
+                    }
+                }
+                else -> {
+                    appendToReplayBuffer(raw)
+                    fanOut(raw, excluding = from)
+                }
+            }
+        } catch (e : Exception) {
+            Log.w(TAG, "Failed to parse packet: ${e.message} - raw len=${raw.length}")
         }
     }
 
