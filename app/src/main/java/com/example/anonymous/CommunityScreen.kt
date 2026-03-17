@@ -1,7 +1,5 @@
 package com.example.anonymous
 
-import android.R
-import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -12,8 +10,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -21,27 +19,31 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
-import coil.request.Disposable
 import coil.request.ImageRequest
 import com.example.anonymous.community.CommunityInvite
 import com.example.anonymous.community.CommunityMemberClient
 import com.example.anonymous.datastore.CommunityCustomizationSettings
+import com.example.anonymous.media.MediaChunkManager
+import com.example.anonymous.media.MediaLoadState
 import com.example.anonymous.network.model.Community
 import com.example.anonymous.network.model.CommunityMessage
 import com.example.anonymous.repository.CommunityRepository
@@ -68,6 +70,7 @@ fun CommunityScreen(
     val coroutineScope = rememberCoroutineScope()
     val communityRepo = remember { CommunityRepository.getInstance(context) }
     val contactRepo = remember { ContactRepository.getInstance(context) }
+    val mediaManager = remember { MediaChunkManager.getInstance(context) }
 
     val myB32 = remember { contactRepo.getMyIdentity()?.b32Address ?: "" }
     val myName = remember { if (myB32.isNotEmpty()) myB32.take(12) else "Unknown" }
@@ -78,8 +81,11 @@ fun CommunityScreen(
     var isConnected by remember { mutableStateOf(false) }
     var showShareDialog by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
 
     val listState = rememberLazyListState()
+
+    val mediaPicker = rememberLauncherForActivityResult(GetContent()) { uri: Uri? -> selectedUri = uri }
 
     // Create client once
     val client = remember {
@@ -88,15 +94,9 @@ fun CommunityScreen(
             myB32 = myB32,
             myName = myName,
             onMessage = { msg: CommunityMessage ->
-                coroutineScope.launch {
-                    coroutineScope.launch {
-                        communityRepo.addMessage(msg)
-                    }
-                }
+                coroutineScope.launch { communityRepo.addMessage(msg) }
             },
-            onConnectionStateChanged = { connected ->
-                isConnected = connected
-            }
+            onConnectionStateChanged = { connected -> isConnected = connected }
         )
     }
 
@@ -119,8 +119,9 @@ fun CommunityScreen(
             )
         }
     }
+     */
     // Build an ImageLoader that supports GIFs.
-    val gifEnabledLoader = remember {
+    val gifLoader = remember {
         ImageLoader.Builder(context)
             .components {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -131,19 +132,16 @@ fun CommunityScreen(
             }
             .build()
     }
-     */
 
     // Start connection
     DisposableEffect(community.b32Address) {
-        client.connect()
+        client.connect(context)
         onDispose { client.disconnect() }
     }
 
     // Scroll to bottom on new message
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.size - 1)
-        }
+        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
     }
 
     Scaffold(
@@ -192,9 +190,36 @@ fun CommunityScreen(
                         message = msg,
                         isOwn = msg.senderB32 == myB32,
                         bubbleColor = customization.postCardColor,
-                        textSize = customization.textSize
+                        textSize = customization.textSize,
+                        mediaManager = mediaManager,
+                        imageLoader = gifLoader,
+                        onRequestMedia = { mediaId -> client.pullMissingChunks(mediaId) }
                     )
                 }
+            }
+
+            // Selected media preview
+            selectedUri?.let { uri ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(120.dp)
+                        .padding(horizontal = 8.dp)
+                ) {
+                    AsyncImage(
+                        model = uri,
+                        contentDescription = "Selected media preview",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(8.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                    TextButton(
+                        onClick = { selectedUri = null },
+                        modifier = Modifier.align(Alignment.TopEnd)
+                    ) { Text("X", color = Color.White) }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
             }
 
             Card(
@@ -211,6 +236,10 @@ fun CommunityScreen(
                         .padding(horizontal = 12.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    IconButton(onClick = { mediaPicker.launch("image/*") }) {
+                        Icon(Icons.Default.AttachFile, contentDescription = "Attach image", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+
                     BasicTextField(
                         value = messageText,
                         onValueChange = { messageText = it },
@@ -233,33 +262,54 @@ fun CommunityScreen(
                     IconButton(
                         onClick = {
                             val text = messageText.trim()
-                            if (text.isNotEmpty() && !isSending) {
+                            val uri = selectedUri
+                            if ((text.isNotEmpty() || uri != null) && !isSending) {
                                 isSending = true
-                                client.sendMessage(text)
 
-                                coroutineScope.launch {
-                                    communityRepo.addMessage(
-                                        CommunityMessage(
-                                            id = "${myB32.take(8)}_${System.currentTimeMillis()}",
-                                            senderB32 = myB32,
-                                            senderName = myName,
-                                            content = text,
-                                            timestamp = System.currentTimeMillis(),
-                                            communityB32 = community.b32Address
+                                if (uri != null) {
+                                    val mediaId = client.sendMedia(uri, text)
+                                    if (mediaId != null) {
+                                        coroutineScope.launch {
+                                            communityRepo.addMessage(
+                                                CommunityMessage(
+                                                    id           = "${myB32.take(8)}_${System.currentTimeMillis()}",
+                                                    senderB32    = myB32,
+                                                    senderName   = myName,
+                                                    content      = text.ifBlank { "📷" },
+                                                    timestamp    = System.currentTimeMillis(),
+                                                    communityB32 = community.b32Address,
+                                                    mediaId      = mediaId
+                                                )
+                                            )
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "Image too large (max 1 MB after compression", Toast.LENGTH_SHORT).show()
+                                    }
+                                    selectedUri = null
+                                } else if (text.isNotEmpty()) {
+                                    client.sendMessage(text)
+                                    coroutineScope.launch {
+                                        communityRepo.addMessage(
+                                            CommunityMessage(
+                                                id  = "${myB32.take(8)}_${System.currentTimeMillis()}",
+                                                senderB32 = myB32,
+                                                senderName = myName,
+                                                content = text,
+                                                timestamp = System.currentTimeMillis(),
+                                                communityB32 = community.b32Address
+                                            )
                                         )
-                                    )
-                                    isSending = false
+                                    }
                                 }
+
+                                isSending = false
                                 messageText = ""
                             }
                         },
-                        enabled = messageText.isNotBlank() && !isSending
+                        enabled = (messageText.isNotBlank() || selectedUri != null) && !isSending
                     ) {
-                        if (isSending) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                        } else {
-                            Icon(Icons.Default.Send, contentDescription = "Send")
-                        }
+                        if (isSending) CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                        else Icon(Icons.Default.Send, contentDescription = "Send")
                     }
                 }
             }
@@ -318,7 +368,10 @@ private fun CommunityMessageBubble(
     message: CommunityMessage,
     isOwn: Boolean,
     bubbleColor: Color,
-    textSize: Int
+    textSize: Int,
+    mediaManager: MediaChunkManager,
+    imageLoader: ImageLoader,
+    onRequestMedia: (String) -> Unit
 ) {
     val alignment = if (isOwn) Alignment.CenterEnd else Alignment.CenterStart
     val ownBubble = MaterialTheme.colorScheme.primary
@@ -350,12 +403,25 @@ private fun CommunityMessageBubble(
                 shadowElevation = 2.dp
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    Text(
-                        text = message.content,
-                        fontSize = textSize.sp,
-                        color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
+                    message.mediaId?.let { mediaId ->
+                        MediaAttachment(
+                            mediaId = mediaId,
+                            mediaManager = mediaManager,
+                            imageLoader = imageLoader,
+                            onRequestMedia = onRequestMedia
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+
+                    if (message.content.isNotBlank() && message.content != "media") {
+                        Text(
+                            text = message.content,
+                            fontSize = textSize.sp,
+                            color = if (isOwn) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                    }
+
                     Text(
                         text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp)),
                         style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp),
@@ -363,6 +429,94 @@ private fun CommunityMessageBubble(
                         modifier = Modifier.align(Alignment.End)
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaAttachment(
+    mediaId: String,
+    mediaManager: MediaChunkManager,
+    imageLoader: ImageLoader,
+    onRequestMedia: (String) -> Unit
+) {
+    val state by mediaManager.stateFor(mediaId).collectAsState()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .heightIn(min = 80.dp, max = 220.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        contentAlignment = Alignment.Center
+    ) {
+        when (val s = state) {
+            is MediaLoadState.Ready -> {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(s.file)
+                        .crossfade(true)
+                        .build(),
+                    imageLoader = imageLoader,
+                    contentDescription = "Shared image",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            is MediaLoadState.Loading -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    val progress = if (s.meta.chunkCount > 0) s.received.toFloat() / s.meta.chunkCount else 0f
+
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier.size(36.dp)
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "${s.received}/${s.meta.chunkCount} chunks",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            is MediaLoadState.Pending -> {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier            = Modifier
+                        .fillMaxSize()
+                        .clickable { onRequestMedia(mediaId) }
+                        .padding(16.dp)
+                ) {
+                    Icon(
+                        Icons.Default.CloudDownload,
+                        contentDescription = "Download image",
+                        modifier           = Modifier.size(32.dp),
+                        tint               = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text      = "Tap to load image\n(${s.meta.totalSize / 1024} KB)",
+                        style     = MaterialTheme.typography.bodySmall,
+                        color     = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+            MediaLoadState.Unknown -> {
+                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+            }
+            MediaLoadState.Error -> {
+                Text(
+                    text  = "Failed to load image",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
