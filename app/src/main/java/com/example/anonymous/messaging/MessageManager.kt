@@ -1,10 +1,13 @@
 package com.example.anonymous.messaging
 
 import android.content.Context
+import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import com.example.anonymous.crypto.CryptoManager
 import com.example.anonymous.i2p.SAMClient
+import com.example.anonymous.media.MediaChunkManager
+import com.example.anonymous.media.MediaMeta
 import com.example.anonymous.network.model.Message
 import com.example.anonymous.repository.ContactRepository
 import com.example.anonymous.repository.MessageRepository
@@ -89,7 +92,9 @@ class MessageManager private constructor(context: Context) {
         val salt: String,                   // Base64 salt for HKDF
         val timestamp: Long = System.currentTimeMillis(),
         val replyToId: String? = null,
-        val messageId: String = UUID.randomUUID().toString()
+        val messageId: String = UUID.randomUUID().toString(),
+        val mediaId: String? = null,
+        val chunkIndex: Int = -1
     )
 
     enum class ConnectionState {
@@ -385,6 +390,99 @@ class MessageManager private constructor(context: Context) {
         }
     }
 
+    suspend fun sendMedia(contactB32: String, uri: Uri, caption: String = "", replyToId: String? = null): Result<Message> = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val mediaManager = MediaChunkManager.getInstance(context)
+
+            val (meta, chunks) = mediaManager.prepareMedia(uri) ?: return@withContext Result.failure(Exception("Could not establish I2P connection to $contactB32"))
+
+            val connection = getOrCreateConnection(contactB32) ?: return@withContext Result.failure(Exception("Could not establish I2P connection to $contactB32"))
+
+            val myB32 = getMyB32Address() ?: return@withContext Result.failure(Exception("No I2P identity"))
+
+            fun emptyNetwork(type: String, mediaId: String? = null, chunkIndex: Int = -1, payload: String = "") = NetworkMessage(
+                v = PROTOCOL_VERSION,
+                type = type,
+                senderB32 = myB32,
+                recipientB32 = contactB32,
+                encryptedPayload = payload,
+                iv = "",
+                authTag = "",
+                dhPublicKey = "",
+                salt = "",
+                timestamp = System.currentTimeMillis(),
+                mediaId = mediaId,
+                chunkIndex = chunkIndex
+            )
+
+            // 1. Send MEDIA_META
+            val metaPacket = emptyNetwork(type = "media_meta", mediaId = meta.mediaId, payload = gson.toJson(meta))
+            sendOverI2P(connection, metaPacket)
+
+            // 2. Send chunks
+            chunks.forEachIndexed { index, chunkB64 ->
+                val chunkPacket = emptyNetwork(type = "media_chunk", mediaId = meta.mediaId, chunkIndex = index, payload = chunkB64)
+                sendOverI2P(connection, chunkPacket)
+            }
+            Log.i(TAG, "Sent ${chunks.size} chunks for media ${meta.mediaId} to $contactB32")
+
+            // 3. Send messageId's text message
+            val messageId = UUID.randomUUID().toString()
+            _messageStatus.emit(MessageStatus(messageId, Status.SENDING))
+
+            val displayText = caption.ifBlank { "media" }
+
+            val ephemeralKeyPair = cryptoManager.generateECDHKeyPair()
+            val recipientPublicKey = getRecipientPublicKey(contactB32) ?: return@withContext Result.failure(Exception("No public key for contact $contactB32"))
+            val sharedSecret = cryptoManager.performECDH(ephemeralKeyPair.private, recipientPublicKey)
+            val salt = generateSalt()
+            val aesKey = cryptoManager.deriveAESKey(sharedSecret, salt, "AnonymousMessage".toByteArray())
+            val encryptedData = cryptoManager.encryptMessage(displayText, aesKey, null)
+            val dhPublicKey = Base64.encodeToString(ephemeralKeyPair.public.encoded, Base64.NO_WRAP)
+
+            val networkMessage = NetworkMessage(
+                v = PROTOCOL_VERSION,
+                type = "text",
+                senderB32 = myB32,
+                recipientB32 = contactB32,
+                encryptedPayload = encryptedData.ct,
+                iv = encryptedData.iv,
+                authTag = encryptedData.authTag,
+                dhPublicKey = dhPublicKey,
+                salt = Base64.encodeToString(salt, Base64.NO_WRAP),
+                timestamp = System.currentTimeMillis(),
+                replyToId = replyToId,
+                messageId = messageId,
+                mediaId = meta.mediaId
+            )
+            sendOverI2P(connection, networkMessage)
+
+            // 4. Store locally
+            val message = Message(
+                id = messageId,
+                content = displayText,
+                encryptedContent = encryptedData.ct,
+                senderId = myB32,
+                receiverId = contactB32,
+                timestamp = System.currentTimeMillis(),
+                isRead = true,
+                iv = encryptedData.iv,
+                authTag = encryptedData.authTag,
+                version = encryptedData.v,
+                dhPublicKey = dhPublicKey,
+                mediaId = meta.mediaId
+            )
+            messageRepository.addMessage(message)
+            _messageStatus.emit(MessageStatus(message.id, Status.SENT))
+
+            Result.success(message)
+        } catch (e : Exception) {
+            Log.e(TAG, "sendMedia failed", e)
+            _messageStatus.emit(MessageStatus(UUID.randomUUID().toString(), Status.FAILED))
+            Result.failure(e)
+        }
+    }
+
     /**
      * Get or Create I2P connection to peer
      */
@@ -401,10 +499,9 @@ class MessageManager private constructor(context: Context) {
 
         try {
             // Reuse the existing persistent session opened in initialize().
-            // Never re-supply savedPrivKey here — only initialize() owns that.
-            val session = samClient.getActiveSessions().firstOrNull() ?: samClient.createStreamSession().getOrNull() ?: return@withContext null
+            val sessionId = serverSessionId ?: return@withContext null.also { Log.e(TAG, "getOrCreateConnection: serverSessionId is null - MessageManager not initialized") }
 
-            val socketResult = samClient.connectToPeer(session.id, contactB32)
+            val socketResult = samClient.connectToPeer(sessionId, contactB32)
             if (socketResult.isFailure) {
                 Log.e(TAG, "Failed to connect to $contactB32 via I2P")
                 return@withContext null
@@ -588,6 +685,21 @@ class MessageManager private constructor(context: Context) {
                     _messageStatus.emit(MessageStatus(networkMsg.messageId, Status.READ))
                     return
                 }
+                "media_meta" -> {
+                    val metaJson = networkMsg.encryptedPayload
+                    val meta = gson.fromJson(metaJson, MediaMeta::class.java)
+                    MediaChunkManager.getInstance(context).registerMeta(meta)
+                    Log.d(TAG, "Received media_meta for ${meta.mediaId} (${meta.chunkCount} chunks) from $senderB32")
+                    return
+                }
+                "media_chunk" -> {
+                    val mediaId = networkMsg.mediaId ?: run {
+                        Log.w(TAG, "media_chunk with no mediaId from $senderB32")
+                        return
+                    }
+                    MediaChunkManager.getInstance(context).onChunkReceived(mediaId, networkMsg.chunkIndex, networkMsg.encryptedPayload)
+                    return
+                }
                 "text" -> {}
                 else -> {
                     Log.w(TAG, "Unknown message type '${networkMsg.type}' - ignoring")
@@ -653,7 +765,8 @@ class MessageManager private constructor(context: Context) {
                 iv = networkMsg.iv,
                 authTag = networkMsg.authTag,
                 version = networkMsg.v,
-                dhPublicKey = networkMsg.dhPublicKey
+                dhPublicKey = networkMsg.dhPublicKey,
+                mediaId = networkMsg.mediaId
             )
 
             // Store in repository
@@ -697,7 +810,12 @@ class MessageManager private constructor(context: Context) {
     }
 
     private fun getMyB32Address(): String? {
-        return samClient.getActiveSessions().firstOrNull()?.b32Address ?: contactRepository.getMyIdentity()?.b32Address
+        val sessionId = serverSessionId
+        if (sessionId != null) {
+            val session = samClient.getActiveSessions().find { it.id == sessionId }
+            if (session != null) return session.b32Address
+        }
+        return contactRepository.getMyIdentity()?.b32Address
     }
 
     private fun saveMyI2PIdentity(b32Address: String, destination: String) {
