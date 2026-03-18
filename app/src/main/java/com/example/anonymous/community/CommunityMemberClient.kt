@@ -154,33 +154,56 @@ class CommunityMemberClient(
 
     private suspend fun connectLoop() {
         val sam = SAMClient.getInstance()
+        var sessionId: String? = null
 
-        while (scope.isActive) {
-            try {
-                val session = sam.createStreamSession().getOrThrow()
-                val socket = sam.connectToPeer(session.id, community.b32Address).getOrThrow()
+        try {
+            while (scope.isActive) {
+                try {
+                    if (sessionId == null) {
+                        val session = sam.createStreamSession().getOrThrow()
+                        sessionId = session.id
+                    }
 
-                val w = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
-                val r = BufferedReader(InputStreamReader(socket.getInputStream()))
-                writer = w
+                    val socket = sam.connectToPeer(sessionId, community.b32Address).getOrThrow()
 
-                onConnectionStateChanged(true)
-                Log.i(TAG, "Connected to community ${community.name}")
+                    val w = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
+                    val r = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    writer = w
 
-                var line: String?
-                while (r.readLine().also { line = it } != null) { handlePacket(line!!) }
-            } catch (_ : CancellationException) {
-                break
-            } catch (e : Exception) {
-                Log.w(TAG, "Community connection lost: ${e.message}")
-            } finally {
-                writer = null
-                onConnectionStateChanged(false)
+                    onConnectionStateChanged(true)
+                    Log.i(TAG, "Connected to community ${community.name}")
+
+                    try {
+                        var line: String?
+                        while (r.readLine().also { line = it } != null) { handlePacket(line!!) }
+                    } finally {
+                        runCatching { socket.close() }
+                    }
+                } catch (_ : CancellationException) {
+                    break
+                } catch (e : Exception) {
+                    Log.w(TAG, "Community connection lost: ${e.message}")
+                    val liveSession = sessionId?.let { id ->
+                        sam.getActiveSessions().find { it.id == id }
+                    }
+                    if (liveSession == null || liveSession.sessionSocket.isClosed) {
+                        sessionId?.let { sam.removeSession(it) }
+                        sessionId = null
+                    }
+                } finally {
+                    writer = null
+                    onConnectionStateChanged(false)
+                }
+
+                if (scope.isActive) {
+                    Log.i(TAG, "Reconnecting to ${community.name} in ${RECONNECT_MS / 1000}s")
+                    delay(RECONNECT_MS)
+                }
             }
-
-            if (scope.isActive) {
-                Log.i(TAG, "Reconnecting to ${community.name} in ${RECONNECT_MS / 1000}s")
-                delay(RECONNECT_MS)
+        } finally {
+            sessionId?.let {
+                sam.removeSession(it)
+                Log.d(TAG, "Session $it cleaned up on connectinLoop exit")
             }
         }
     }
