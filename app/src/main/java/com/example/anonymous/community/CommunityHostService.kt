@@ -54,6 +54,7 @@ class CommunityHostService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var mediaManager: MediaChunkManager
+    private var currentCommunityB32: String? = null
 
     companion object {
         private const val TAG = "CommunityHostService"
@@ -62,6 +63,7 @@ class CommunityHostService : Service() {
         private const val WAKELOCK_TAG = "Anonymous:CommunityHostWakeLock"
         private const val REPLAY_BUFFER_SIZE = 100
         const val EXTRA_COMMUNITY_B32 = "community_b32"
+        const val EXTRA_INJECT_PACKET = "inject_packet"
 
         fun start(context: Context, communityB32: String) {
             val intent = Intent(context, CommunityHostService::class.java)
@@ -75,10 +77,13 @@ class CommunityHostService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, CommunityHostService::class.java))
         }
+
+        @Volatile var localPacketSink: ((String) -> Unit)? = null
     }
 
     override fun onCreate() {
         super.onCreate()
+        mediaManager = MediaChunkManager.getInstance(this)
         createNotificationChannel()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -91,12 +96,18 @@ class CommunityHostService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val communityId = intent?.getStringExtra(EXTRA_COMMUNITY_B32)
+        intent?.getStringExtra(EXTRA_INJECT_PACKET)?.let { rawPacket ->
+            injectLocalPacket(rawPacket)
+            return START_STICKY
+        }
+
+        val communityId = intent?.getStringExtra(EXTRA_COMMUNITY_B32) ?: currentCommunityB32
         if (communityId == null) {
             Log.e(TAG, "Started without community ID - stopping")
             stopSelf()
             return START_NOT_STICKY
         }
+        currentCommunityB32 = communityId
 
         if (wakeLock?.isHeld != true) acquireWakeLock()
 
@@ -106,13 +117,17 @@ class CommunityHostService : Service() {
     }
 
     override fun onDestroy() {
+        localPacketSink = null
         releaseWakeLock()
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        startService(Intent(this, CommunityHostService::class.java))
+        val intent = Intent(this, CommunityHostService::class.java).apply {
+            currentCommunityB32?.let { putExtra(EXTRA_COMMUNITY_B32, it) }
+        }
+        startService(intent)
         super.onTaskRemoved(rootIntent)
     }
 
@@ -133,25 +148,50 @@ class CommunityHostService : Service() {
         updateNotification("Hosting ${community.name}")
 
         var retryDelay = 10_000L
+        val samReadyTimeoutMs = 6 * retryDelay
+        val samPollIntervalMs = 3_000L
+        val samDeadline = System.currentTimeMillis() + samReadyTimeoutMs
+        var samReady = false
+        while (scope.isActive && System.currentTimeMillis() < samDeadline) {
+            val reachable = runCatching { sam.connect() }.getOrDefault(false)
+            if (reachable) { samReady = true; break }
+            Log.d(TAG, "Waiting for SAM bridge...")
+            delay(samPollIntervalMs)
+        }
+        if (!samReady) {
+            Log.e(TAG, "SAM not reachable after ${samReadyTimeoutMs / 1000}s - stopping host service")
+            stopSelf()
+            return
+        }
+        Log.i(TAG, "SAM bridge reachable - starting host session for ${community.name}")
 
-        while (scope.isActive) {
-            try {
-                val session = sam.createStreamSession().getOrThrow()
-                Log.i(TAG, "Host session open: ${community.b32Address}")
-                retryDelay = 10_000L
+        var session: SAMClient.SAMSession? = null
 
-                while (scope.isActive) {
-                    val (socket, peerDest) = sam.acceptConnection(session.id).getOrThrow()
-                    Log.i(TAG, "New member connected (${peerDest.take(20)}...)")
-                    scope.launch { handleMember(socket, peerDest) }
+        localPacketSink = ::injectLocalPacket
+        try {
+            while (scope.isActive) {
+                try {
+                    session = sam.createStreamSession(community.samPrivateKey).getOrThrow()
+                    Log.i(TAG, "Host session open: ${session.b32Address} (expected: ${community.b32Address})")
+                    retryDelay = 10_000L
+
+                    while (scope.isActive) {
+                        val (socket, peerDest) = sam.acceptConnection(session.id).getOrThrow()
+                        Log.i(TAG, "New member connected (${peerDest.take(20)}...)")
+                        scope.launch { handleMember(socket, peerDest) }
+                    }
+                } catch (_: CancellationException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(TAG, "Host loop error: ${e.message} - retry in ${retryDelay / 1000}s")
+                    session?.let { runCatching { sam.removeSession(it.id) } }
+                    session = null
+                    delay(retryDelay)
+                    retryDelay = minOf(retryDelay * 2, 120_000L)
                 }
-            } catch (_ : CancellationException) {
-                break
-            } catch (e : Exception) {
-                Log.e(TAG, "Host loop error: ${e.message} - retry in ${retryDelay / 1000}s")
-                delay(retryDelay)
-                retryDelay = minOf(retryDelay * 2, 120_000L)
             }
+        } finally {
+            localPacketSink = null
         }
 
         Log.i(TAG, "Host loop exited cleanly")
@@ -172,7 +212,7 @@ class CommunityHostService : Service() {
             while (reader.readLine().also { line = it } != null) {
                 routePacket(line!!, from = member)
             }
-        } catch (e : Exception) {
+        } catch (e: Exception) {
             Log.d(TAG, "Member socket closed: ${e.message}")
         } finally {
             activeMembers.remove(member)
@@ -224,8 +264,9 @@ class CommunityHostService : Service() {
                         )
                         try {
                             from.writer.write(response)
-                            from.writer.newLine(); from.writer.flush()
-                        } catch (e : Exception) {
+                            from.writer.newLine()
+                            from.writer.flush()
+                        } catch (e: Exception) {
                             Log.e(TAG, "Failed to serve chunk $index for $mediaId: ${e.message}")
                         }
                     } else {
@@ -237,18 +278,20 @@ class CommunityHostService : Service() {
                     fanOut(raw, excluding = from)
                 }
             }
-        } catch (e : Exception) {
+        } catch (e: Exception) {
             Log.w(TAG, "Failed to parse packet: ${e.message} - raw len=${raw.length}")
         }
     }
 
-    private fun fanOut(packet: String, excluding: MemberSocket) {
+    private fun fanOut(packet: String, excluding: MemberSocket?) {
         val dead = mutableListOf<MemberSocket>()
         activeMembers.forEach { member ->
-            if (member !== excluding) {
+            if (excluding == null || member !== excluding) {
                 try {
-                    member.writer.write(packet); member.writer.newLine(); member.writer.flush()
-                } catch (_ : Exception) {
+                    member.writer.write(packet)
+                    member.writer.newLine()
+                    member.writer.flush()
+                } catch (_: Exception) {
                     dead.add(member)
                 }
             }
@@ -260,8 +303,10 @@ class CommunityHostService : Service() {
         synchronized(replayLock) {
             replayBuffer.forEach { packet ->
                 try {
-                    writer.write(packet); writer.newLine(); writer.flush()
-                } catch (_ : Exception) { }
+                    writer.write(packet)
+                    writer.newLine()
+                    writer.flush()
+                } catch (_: Exception) { }
             }
         }
     }
@@ -273,6 +318,11 @@ class CommunityHostService : Service() {
         }
     }
 
+    private fun injectLocalPacket(raw: String) {
+        appendToReplayBuffer(raw)
+        fanOut(raw, excluding = null)
+    }
+
     // WakeLock
 
     private fun acquireWakeLock() {
@@ -280,11 +330,11 @@ class CommunityHostService : Service() {
             if (wakeLock?.isHeld == true) return
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply { acquire() }
-        } catch (e : Exception) { Log.e(TAG, "WakeLock acquire failed: ${e.message}") }
+        } catch (e: Exception) { Log.e(TAG, "WakeLock acquire failed: ${e.message}") }
     }
 
     private fun releaseWakeLock() {
-        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_ : Exception) { }
+        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) { }
     }
 
     // Notification
