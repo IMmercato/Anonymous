@@ -23,6 +23,7 @@ import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.util.concurrent.ConcurrentLinkedDeque
 
 class CommunityMemberClient(
     private val community: Community,
@@ -34,6 +35,7 @@ class CommunityMemberClient(
     companion object {
         private const val TAG = "CommunityMemberClient"
         private const val RECONNECT_MS = 15_000L
+        private const val RECONNECT_MAX_MS = 5 * 60_000L      // 5 minutes cap
         private const val CHUNK_SEND_DELAY_MS = 30L
     }
 
@@ -44,35 +46,43 @@ class CommunityMemberClient(
 
     @Volatile private var writer: BufferedWriter? = null
 
+    // Messages queued while not connected
+    private val pendingMessages = ConcurrentLinkedDeque<Pair<String, Long>>()
+
     fun connect(context: Context) {
         mediaManager = MediaChunkManager.getInstance(context)
         scope.launch { connectLoop() }
     }
 
-    fun sendMessage(text: String) {
+    fun sendMessage(text: String, timestamp: Long = System.currentTimeMillis()) {
         scope.launch {
             val w = writer ?: run {
-                Log.w(TAG, "sendMessage called while disconnected - dropping")
+                Log.w(TAG, "sendMessage: not connected - queueing")
+                pendingMessages.offer(text to timestamp)
                 return@launch
             }
-            try {
-                val encrypted = CommunityEncryption.encrypt(text, groupKey)
-                val packet = CommunityPacket(
-                    type = MediaProtocol.TYPE_MSG,
-                    senderB32 = myB32,
-                    senderName = myName,
-                    payload = encrypted,
-                    timestamp = System.currentTimeMillis()
-                )
-                sendLine(w, json.encodeToString(packet))
-            } catch (e : Exception) {
-                Log.e(TAG, "sendMessage failed ${e.message}")
-                writer = null
-            }
+            doSendText(w, text, timestamp)
         }
     }
 
-    fun sendMedia(uri: Uri, caption: String = ""): String? {
+    private fun doSendText(w: BufferedWriter, text: String, timestamp: Long) {
+        try {
+            val encrypted = CommunityEncryption.encrypt(text, groupKey)
+            val packet = CommunityPacket(
+                type = MediaProtocol.TYPE_MSG,
+                senderB32 = myB32,
+                senderName = myName,
+                payload = encrypted,
+                timestamp = timestamp
+            )
+            sendLine(w, json.encodeToString(packet))
+        } catch (e: Exception) {
+            Log.e(TAG, "doSendText failed: ${e.message}")
+            writer = null
+        }
+    }
+
+    fun sendMedia(uri: Uri, caption: String = "", timestamp: Long = System.currentTimeMillis()): String? {
         val w = writer ?: run { Log.w(TAG, "sendMedia: not connected"); return null }
 
         val (meta, chunks) = mediaManager.prepareMedia(uri) ?: run {
@@ -86,7 +96,7 @@ class CommunityMemberClient(
                     type = MediaProtocol.TYPE_MEDIA_META,
                     senderB32 = myB32,
                     senderName = myName,
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = timestamp,
                     meta = meta
                 )
                 sendLine(w, json.encodeToString(metaPacket))
@@ -98,7 +108,7 @@ class CommunityMemberClient(
                     senderB32 = myB32,
                     senderName = myName,
                     payload = encrypted,
-                    timestamp = System.currentTimeMillis(),
+                    timestamp = timestamp,
                     mediaId = meta.mediaId
                 )
                 sendLine(w, json.encodeToString(msgPacket))
@@ -110,14 +120,14 @@ class CommunityMemberClient(
                         mediaId = meta.mediaId,
                         chunkIndex = index,
                         chunkData = chunkData,
-                        timestamp = System.currentTimeMillis()
+                        timestamp = timestamp
                     )
                     sendLine(w, json.encodeToString(chunkPacket))
                     delay(CHUNK_SEND_DELAY_MS)
                 }
 
                 Log.i(TAG, "Media ${meta.mediaId} uploaded (${chunks.size} chunks)")
-            } catch (e : Exception) {
+            } catch (e: Exception) {
                 Log.e(TAG, "sendMedia upload failed: ${e.message}")
                 writer = null
             }
@@ -155,6 +165,7 @@ class CommunityMemberClient(
     private suspend fun connectLoop() {
         val sam = SAMClient.getInstance()
         var sessionId: String? = null
+        var reconnectDelayMs = RECONNECT_MS
 
         try {
             while (scope.isActive) {
@@ -169,9 +180,17 @@ class CommunityMemberClient(
                     val w = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
                     val r = BufferedReader(InputStreamReader(socket.getInputStream()))
                     writer = w
-
+                    reconnectDelayMs = RECONNECT_MS
                     onConnectionStateChanged(true)
                     Log.i(TAG, "Connected to community ${community.name}")
+
+                    var queued = pendingMessages.poll()
+                    while (queued != null) {
+                        val (text, ts) = queued
+                        Log.d(TAG, "Flushing queued message ts=$ts")
+                        doSendText(w, text, ts)
+                        queued = pendingMessages.poll()
+                    }
 
                     try {
                         var line: String?
@@ -179,9 +198,9 @@ class CommunityMemberClient(
                     } finally {
                         runCatching { socket.close() }
                     }
-                } catch (_ : CancellationException) {
+                } catch (_: CancellationException) {
                     break
-                } catch (e : Exception) {
+                } catch (e: Exception) {
                     Log.w(TAG, "Community connection lost: ${e.message}")
                     val liveSession = sessionId?.let { id ->
                         sam.getActiveSessions().find { it.id == id }
@@ -196,19 +215,20 @@ class CommunityMemberClient(
                 }
 
                 if (scope.isActive) {
-                    Log.i(TAG, "Reconnecting to ${community.name} in ${RECONNECT_MS / 1000}s")
-                    delay(RECONNECT_MS)
+                    Log.i(TAG, "Reconnecting to ${community.name} in ${reconnectDelayMs / 1000}s")
+                    delay(reconnectDelayMs)
+                    reconnectDelayMs = minOf(reconnectDelayMs * 2, RECONNECT_MAX_MS)
                 }
             }
         } finally {
             sessionId?.let {
                 sam.removeSession(it)
-                Log.d(TAG, "Session $it cleaned up on connectinLoop exit")
+                Log.d(TAG, "Session $it cleaned up on connectLoop exit")
             }
         }
     }
 
-    private fun handlePacket(raw : String) {
+    private fun handlePacket(raw: String) {
         try {
             val packet = json.decodeFromString<CommunityPacket>(raw)
             when (packet.type) {
@@ -217,7 +237,7 @@ class CommunityMemberClient(
                 MediaProtocol.TYPE_MEDIA_CHUNK -> handleMediaChunk(packet)
                 else -> Log.v(TAG, "Unknown packet type: ${packet.type}")
             }
-        } catch (e : Exception) {
+        } catch (e: Exception) {
             Log.w(TAG, "handlePacket error: ${e.message}")
         }
     }
