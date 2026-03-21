@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.GetContent
@@ -39,17 +40,25 @@ import coil.compose.AsyncImage
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
 import coil.request.ImageRequest
+import com.example.anonymous.community.CommunityEncryption
+import com.example.anonymous.community.CommunityHostService
 import com.example.anonymous.community.CommunityInvite
 import com.example.anonymous.community.CommunityMemberClient
 import com.example.anonymous.datastore.CommunityCustomizationSettings
 import com.example.anonymous.media.MediaChunkManager
 import com.example.anonymous.media.MediaLoadState
+import com.example.anonymous.media.MediaProtocol
 import com.example.anonymous.network.model.Community
 import com.example.anonymous.network.model.CommunityMessage
+import com.example.anonymous.network.model.CommunityPacket
 import com.example.anonymous.repository.CommunityRepository
 import com.example.anonymous.repository.ContactRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
+import java.util.Base64
 import java.util.Date
 import java.util.Locale
 
@@ -74,6 +83,8 @@ fun CommunityScreen(
 
     val myB32 = remember { contactRepo.getMyIdentity()?.b32Address ?: "" }
     val myName = remember { if (myB32.isNotEmpty()) myB32.take(12) else "Unknown" }
+    val groupKey = remember(community.groupKeyBase64) { Base64.getDecoder().decode(community.groupKeyBase64) }
+    val json = remember { Json { ignoreUnknownKeys = true } }
 
     val messages by communityRepo.getMessagesFlow(community.b32Address).collectAsState(initial = emptyList())
 
@@ -89,15 +100,17 @@ fun CommunityScreen(
 
     // Create client once
     val client = remember {
-        CommunityMemberClient(
-            community = community,
-            myB32 = myB32,
-            myName = myName,
-            onMessage = { msg: CommunityMessage ->
-                coroutineScope.launch { communityRepo.addMessage(msg) }
-            },
-            onConnectionStateChanged = { connected -> isConnected = connected }
-        )
+        if (!community.isCreator) {
+            CommunityMemberClient(
+                community = community,
+                myB32 = myB32,
+                myName = myName,
+                onMessage = { msg ->
+                    coroutineScope.launch { communityRepo.addMessage(msg) }
+                },
+                onConnectionStateChanged = { connected -> isConnected = connected }
+            )
+        } else null
     }
 
     // For demo purposes, we pre-add some posts.
@@ -133,10 +146,18 @@ fun CommunityScreen(
             .build()
     }
 
-    // Start connection
-    DisposableEffect(community.b32Address) {
-        client.connect(context)
-        onDispose { client.disconnect() }
+    // Community Host
+    LaunchedEffect(community.isCreator) {
+        if (community.isCreator) isConnected = true
+    }
+
+    // Clean up member client
+    DisposableEffect(community.b32Address, community.isCreator) {
+        if (community.isCreator) CommunityHostService.start(context, community.b32Address)
+        else client?.connect(context)
+        onDispose {
+            if (!community.isCreator) client?.disconnect()
+        }
     }
 
     // Scroll to bottom on new message
@@ -193,7 +214,10 @@ fun CommunityScreen(
                         textSize = customization.textSize,
                         mediaManager = mediaManager,
                         imageLoader = gifLoader,
-                        onRequestMedia = { mediaId -> client.pullMissingChunks(mediaId) }
+                        onRequestMedia = { mediaId ->
+                            if (!community.isCreator) client?.pullMissingChunks(mediaId)
+                            else Log.d("CommunityScreen", "Host cannot pull chunks (no client)")
+                        }
                     )
                 }
             }
@@ -266,44 +290,143 @@ fun CommunityScreen(
                             if ((text.isNotEmpty() || uri != null) && !isSending) {
                                 isSending = true
 
-                                if (uri != null) {
-                                    val mediaId = client.sendMedia(uri, text)
-                                    if (mediaId != null) {
+                                if (community.isCreator) {
+                                    val sink = CommunityHostService.localPacketSink
+                                    if (sink == null) {
+                                        Toast.makeText(context, "Host service not ready", Toast.LENGTH_SHORT).show()
+                                        isSending = false
+                                        return@IconButton
+                                    }
+                                    if (uri != null) {
+                                        // Host media
                                         coroutineScope.launch {
-                                            communityRepo.addMessage(
-                                                CommunityMessage(
-                                                    id           = "${myB32.take(8)}_${System.currentTimeMillis()}",
-                                                    senderB32    = myB32,
-                                                    senderName   = myName,
-                                                    content      = text.ifBlank { "📷" },
-                                                    timestamp    = System.currentTimeMillis(),
+                                            try {
+                                                val result = withContext(Dispatchers.IO) { mediaManager.prepareMedia(uri) }
+                                                if (result == null) {
+                                                    Toast.makeText(context, "Failed to sen image - too large after compression (max 1 MB)", Toast.LENGTH_SHORT).show()
+                                                    return@launch
+                                                }
+                                                val (meta, chunks) = result
+                                                val ts = System.currentTimeMillis()
+
+                                                withContext(Dispatchers.IO) {
+                                                    sink(json.encodeToString(CommunityPacket(
+                                                        type = MediaProtocol.TYPE_MEDIA_META,
+                                                        senderB32 = myB32,
+                                                        senderName = myName,
+                                                        timestamp = ts,
+                                                        meta = meta
+                                                    )))
+                                                    val encrypted = CommunityEncryption.encrypt(text.ifBlank { "media" }, groupKey)
+                                                    sink(json.encodeToString(CommunityPacket(
+                                                        type = MediaProtocol.TYPE_MSG,
+                                                        senderB32 = myB32,
+                                                        senderName = myName,
+                                                        payload = encrypted,
+                                                        timestamp = ts,
+                                                        mediaId = meta.mediaId
+                                                    )))
+                                                    chunks.forEachIndexed { index, chunkData ->
+                                                        sink(json.encodeToString(CommunityPacket(
+                                                            type = MediaProtocol.TYPE_MEDIA_CHUNK,
+                                                            senderB32 = myB32,
+                                                            mediaId = meta.mediaId,
+                                                            chunkIndex = index,
+                                                            chunkData = chunkData,
+                                                            timestamp = ts
+                                                        )))
+                                                    }
+                                                }
+                                                communityRepo.addMessage(CommunityMessage(
+                                                    id = "${myB32.take(8)}_$ts",
+                                                    senderB32 = myB32,
+                                                    senderName = myName,
+                                                    content = text.ifBlank { "media" },
+                                                    timestamp = ts,
                                                     communityB32 = community.b32Address,
-                                                    mediaId      = mediaId
-                                                )
-                                            )
+                                                    mediaId = meta.mediaId
+                                                ))
+                                                selectedUri = null
+                                                messageText = ""
+                                            } finally {
+                                                isSending = false
+                                            }
+                                        }
+                                    } else if (text.isNotEmpty()) {
+                                        // Host text
+                                        coroutineScope.launch {
+                                            try {
+                                                val ts = System.currentTimeMillis()
+                                                withContext(Dispatchers.IO) {
+                                                    val encrypted = CommunityEncryption.encrypt(text, groupKey)
+                                                    sink(json.encodeToString(CommunityPacket(
+                                                        type = MediaProtocol.TYPE_MSG,
+                                                        senderB32 = myB32,
+                                                        senderName = myName,
+                                                        payload = encrypted,
+                                                        timestamp = ts
+                                                    )))
+                                                }
+                                                communityRepo.addMessage(CommunityMessage(
+                                                    id = "${myB32.take(8)}_$ts",
+                                                    senderB32 = myB32,
+                                                    senderName = myName,
+                                                    content = text,
+                                                    timestamp = ts,
+                                                    communityB32 = community.b32Address
+                                                ))
+                                                messageText = ""
+                                            } finally {
+                                                isSending = false
+                                            }
                                         }
                                     } else {
-                                        Toast.makeText(context, "Image too large (max 1 MB after compression", Toast.LENGTH_SHORT).show()
+                                        isSending = false
                                     }
-                                    selectedUri = null
-                                } else if (text.isNotEmpty()) {
-                                    client.sendMessage(text)
-                                    coroutineScope.launch {
-                                        communityRepo.addMessage(
-                                            CommunityMessage(
-                                                id  = "${myB32.take(8)}_${System.currentTimeMillis()}",
+                                } else {
+                                    // Member
+                                    if (uri != null) {
+                                        if (!isConnected) {
+                                            Toast.makeText(context, "Not connected to community yet", Toast.LENGTH_SHORT).show()
+                                            selectedUri = null
+                                            isSending = false
+                                            return@IconButton
+                                        }
+                                        val ts = System.currentTimeMillis()
+                                        val mediaId = client?.sendMedia(uri, text, ts)
+                                        if (mediaId != null) {
+                                            coroutineScope.launch {
+                                                communityRepo.addMessage(CommunityMessage(
+                                                    id = "${myB32.take(8)}_$ts",
+                                                    senderB32 = myB32,
+                                                    senderName = myName,
+                                                    content = text.ifBlank { "media" },
+                                                    timestamp = ts,
+                                                    communityB32 = community.b32Address,
+                                                    mediaId = mediaId
+                                                ))
+                                            }
+                                        } else {
+                                            Toast.makeText(context, "Failed to send image — too large after compression (max 1 MB)", Toast.LENGTH_SHORT).show()
+                                        }
+                                        selectedUri = null
+                                    } else if (text.isNotEmpty()) {
+                                        val ts = System.currentTimeMillis()
+                                        client?.sendMessage(text, ts)
+                                        coroutineScope.launch {
+                                            communityRepo.addMessage(CommunityMessage(
+                                                id = "${myB32.take(8)}_$ts",
                                                 senderB32 = myB32,
                                                 senderName = myName,
                                                 content = text,
-                                                timestamp = System.currentTimeMillis(),
+                                                timestamp = ts,
                                                 communityB32 = community.b32Address
-                                            )
-                                        )
+                                            ))
+                                        }
                                     }
+                                    isSending = false
+                                    messageText = ""
                                 }
-
-                                isSending = false
-                                messageText = ""
                             }
                         },
                         enabled = (messageText.isNotBlank() || selectedUri != null) && !isSending
@@ -329,12 +452,12 @@ fun CommunityScreen(
                         color = MaterialTheme.colorScheme.surfaceVariant,
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                       Text(
-                           text = invite,
-                           modifier = Modifier.padding(12.dp),
-                           style = MaterialTheme.typography.bodySmall,
-                           color = MaterialTheme.colorScheme.onSurfaceVariant
-                       )
+                        Text(
+                            text = invite,
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                     if (!community.isCreator) {
                         Spacer(modifier = Modifier.height(8.dp))
