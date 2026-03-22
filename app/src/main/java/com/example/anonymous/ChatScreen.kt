@@ -76,12 +76,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
@@ -527,11 +530,9 @@ fun ChatMessage(
     val isSent = message.senderId == currentUserId
     val bubbleColor = if (isSent) settings.sentBubbleColor else settings.receivedBubbleColor
     val alignment = if (isSent && settings.isSentRightAligned) Alignment.CenterEnd else Alignment.CenterStart
+    val isPending = false
 
-    Box(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = alignment
-    ) {
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = alignment) {
         Surface(
             shape = RoundedCornerShape(
                 topStart = 12.dp,
@@ -541,11 +542,9 @@ fun ChatMessage(
             ),
             color = bubbleColor,
             shadowElevation = 2.dp,
-            modifier = Modifier.widthIn(min = 50.dp, max = 250.dp)
+            modifier = Modifier.widthIn(min = 50.dp, max = 280.dp)
         ) {
-            Column(
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 val mediaId = message.mediaId
                 if (mediaId != null && mediaManager != null && imageLoader != null) {
                     MediaAttachment(mediaId = mediaId, mediaManager = mediaManager, imageLoader = imageLoader)
@@ -553,9 +552,19 @@ fun ChatMessage(
                 }
 
                 if (message.content.isNotBlank() && message.content != "media") {
-                    LinkifyText(
-                        text = message.content,
-                    )
+                    if (isCode) {
+                        val code = message.content.removePrefix("```").removeSuffix("```").trim()
+                        Text(
+                            text = code,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White,
+                                fontSize = 13.sp
+                            )
+                        )
+                    } else {
+                        FormattedText(text = message.content)
+                    }
                 }
 
                 Row(
@@ -564,14 +573,10 @@ fun ChatMessage(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = SimpleDateFormat("HH:mm", Locale.getDefault())
-                            .format(Date(message.timestamp)),
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            color = Color.Gray,
-                            fontSize = 10.sp
-                        )
+                        text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(message.timestamp)),
+                        style = MaterialTheme.typography.bodyMedium.copy(color = Color.Gray, fontSize = 10.sp)
                     )
-                    if (!isSent) {
+                    if (isPending) {
                         Spacer(modifier = Modifier.width(4.dp))
                         LoadingDots()
                     }
@@ -579,6 +584,29 @@ fun ChatMessage(
             }
         }
     }
+}
+
+@Composable
+private fun FormattedText(text: String) {
+    val annotated = remember(text) {
+        buildAnnotatedString {
+            val pattern = Regex("""\*\*(.+?)\*\*|_(.+?)_|~~(.+?)~~|`(.+?)`""")
+            var cursor = 0
+            for (match in pattern.findAll(text)) {
+                append(text.substring(cursor, match.range.first))
+                val (bold, italic, strike, code) = match.destructured
+                when {
+                    bold.isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(bold) }
+                    italic.isNotEmpty() -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(italic) }
+                    strike.isNotEmpty() -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { append(strike) }
+                    code.isNotEmpty()   -> withStyle(SpanStyle(fontFamily = FontFamily.Monospace, background = Color.LightGray.copy(alpha = 0.35f))) { append(code) }
+                }
+                cursor = match.range.last + 1
+            }
+            if (cursor < text.length) append(text.substring(cursor))
+        }
+    }
+    Text(text = annotated, style = MaterialTheme.typography.bodyLarge)
 }
 
 @Composable
