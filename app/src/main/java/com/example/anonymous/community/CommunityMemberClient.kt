@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import android.util.Log
+import androidx.core.content.edit
 import com.example.anonymous.i2p.SAMClient
 import com.example.anonymous.media.MediaChunkManager
 import com.example.anonymous.media.MediaProtocol
@@ -18,12 +19,16 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.concurrent.ConcurrentLinkedDeque
+
+@Serializable
+private data class QueuedCommunityMsg(val text: String, val timestamp: Long)
 
 class CommunityMemberClient(
     private val community: Community,
@@ -45,13 +50,37 @@ class CommunityMemberClient(
     private lateinit var mediaManager: MediaChunkManager
 
     @Volatile private var writer: BufferedWriter? = null
+    @Volatile private var appContext: Context? = null
 
     // Messages queued while not connected
     private val pendingMessages = ConcurrentLinkedDeque<Pair<String, Long>>()
 
     fun connect(context: Context) {
+        appContext = context.applicationContext
         mediaManager = MediaChunkManager.getInstance(context)
+        loadOfflineQueue()
         scope.launch { connectLoop() }
+    }
+
+    // Offline
+    private fun saveOfflineQueue() {
+        val context = appContext ?: return
+        val prefs = context.getSharedPreferences("comm_queue_$myB32", Context.MODE_PRIVATE)
+        val list = pendingMessages.map { QueuedCommunityMsg(it.first, it.second) }
+        prefs.edit { putString(community.b32Address, json.encodeToString(list)) }
+    }
+    private fun loadOfflineQueue() {
+        val context = appContext ?: return
+        val prefs = context.getSharedPreferences("comm_queue_$myB32", Context.MODE_PRIVATE)
+        val saved = prefs.getString(community.b32Address, null)
+        if (saved != null) {
+            try {
+                val list = json.decodeFromString<List<QueuedCommunityMsg>>(saved)
+                list.forEach { pendingMessages.offer(it.text to it.timestamp) }
+                Log.i(TAG, "Loaded ${list.size} offline messages for ${community.name}")
+            } catch (e: Exception) { Log.e(TAG, "Failed to load offline queue", e) }
+        }
+
     }
 
     fun sendMessage(text: String, timestamp: Long = System.currentTimeMillis()) {
@@ -59,6 +88,7 @@ class CommunityMemberClient(
             val w = writer ?: run {
                 Log.w(TAG, "sendMessage: not connected - queueing")
                 pendingMessages.offer(text to timestamp)
+                saveOfflineQueue()
                 return@launch
             }
             doSendText(w, text, timestamp)
@@ -184,13 +214,17 @@ class CommunityMemberClient(
                     onConnectionStateChanged(true)
                     Log.i(TAG, "Connected to community ${community.name}")
 
+                    // Flush offline queue
                     var queued = pendingMessages.poll()
+                    var queueChanged = false
                     while (queued != null) {
                         val (text, ts) = queued
                         Log.d(TAG, "Flushing queued message ts=$ts")
                         doSendText(w, text, ts)
+                        queueChanged = true
                         queued = pendingMessages.poll()
                     }
+                    if (queueChanged) saveOfflineQueue()
 
                     try {
                         var line: String?
@@ -202,13 +236,16 @@ class CommunityMemberClient(
                     break
                 } catch (e: Exception) {
                     Log.w(TAG, "Community connection lost: ${e.message}")
+                    val isLeaseSetError = e.message?.contains("LeaseSet", ignoreCase = true) == true || e.message?.contains("CANT_REACH", ignoreCase = true) == true
                     val liveSession = sessionId?.let { id ->
                         sam.getActiveSessions().find { it.id == id }
                     }
-                    if (liveSession == null || liveSession.sessionSocket.isClosed) {
+                    if (!isLeaseSetError && (liveSession == null || liveSession.sessionSocket.isClosed)) {
                         sessionId?.let { sam.removeSession(it) }
                         sessionId = null
                     }
+                    if (isLeaseSetError) reconnectDelayMs = RECONNECT_MS
+                    else reconnectDelayMs = minOf(reconnectDelayMs * 2, RECONNECT_MAX_MS)
                 } finally {
                     writer = null
                     onConnectionStateChanged(false)
@@ -217,7 +254,6 @@ class CommunityMemberClient(
                 if (scope.isActive) {
                     Log.i(TAG, "Reconnecting to ${community.name} in ${reconnectDelayMs / 1000}s")
                     delay(reconnectDelayMs)
-                    reconnectDelayMs = minOf(reconnectDelayMs * 2, RECONNECT_MAX_MS)
                 }
             }
         } finally {
