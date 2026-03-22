@@ -52,19 +52,19 @@ object MediaSanitizer {
     }
 
     /**
-    * GIF block layout (GIF89a spec):
-    *   [Header 6B][Logical Screen Descriptor 7B][Global Color Table?]
-    *   ( [Extension Introducer 0x21][Label][Sub-blocks…]
-    *   | [Image Descriptor 0x2C][…][Local Color Table?][Image Data]
-    *   | [Trailer 0x3B] ) *
-    *
-    * Extension labels:
-    *   0xF9  Graphic Control   — keep  (frame timing / disposal)
-    *   0xFF  Application       — keep ONLY "NETSCAPE2.0" (loop count)
-    *                           — drop everything else (XMP, ICCRGBG1012, …)
-    *   0xFE  Comment           — drop  (free-text, can contain author/GPS/tool)
-    *   0x01  Plain Text        — drop  (rarely used, can embed text metadata)
-    */
+     * GIF block layout (GIF89a spec):
+     *   [Header 6B][Logical Screen Descriptor 7B][Global Color Table?]
+     *   ( [Extension Introducer 0x21][Label][Sub-blocks…]
+     *   | [Image Descriptor 0x2C][…][Local Color Table?][Image Data]
+     *   | [Trailer 0x3B] ) *
+     *
+     * Extension labels:
+     *   0xF9  Graphic Control   — keep  (frame timing / disposal)
+     *   0xFF  Application       — keep ONLY "NETSCAPE2.0" (loop count)
+     *                           — drop everything else (XMP, ICCRGBG1012, …)
+     *   0xFE  Comment           — drop  (free-text, can contain author/GPS/tool)
+     *   0x01  Plain Text        — drop  (rarely used, can embed text metadata)
+     */
     private fun stripGifMetadata(raw: ByteArray): ByteArray? {
         if (raw.size < 13) return null
         val header = String(raw, 0, 6)
@@ -84,7 +84,7 @@ object MediaSanitizer {
         val flags = raw[pos + 4].toInt() and 0xFF
         val hasGCT = (flags and 0x80) != 0
         val gctSize = if (hasGCT) 3 * (1 shl ((flags and 0x07) + 1)) else 0
-        out.write(raw, pos, gctSize); pos += 7
+        out.write(raw, pos, 7); pos += 7
 
         // 3. Global Color Table
         if (hasGCT) {
@@ -165,6 +165,7 @@ object MediaSanitizer {
             out.write(size)
             if (size == 0) { pos++; break }
             out.write(raw, pos + 1, size)
+            pos += 1 + size
         }
         return pos
     }

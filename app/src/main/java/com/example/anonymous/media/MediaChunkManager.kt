@@ -40,7 +40,8 @@ class MediaChunkManager private constructor(private val context: Context) {
         val cached = getCachedFile(mediaId)
         val meta = metaStore[mediaId]
         if (cached != null && meta != null) {
-            MutableStateFlow(MediaLoadState.Ready(cached, meta.mimeType))
+            val mime = meta.mimeType ?: "image/webp"
+            MutableStateFlow(MediaLoadState.Ready(cached, mime))
         } else if (meta != null) {
             MutableStateFlow(MediaLoadState.Pending(meta))
         } else {
