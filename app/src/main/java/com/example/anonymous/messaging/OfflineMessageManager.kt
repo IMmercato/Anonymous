@@ -192,17 +192,20 @@ class OfflineMessageManager private constructor(context: Context) {
     private suspend fun attemptDelivery(queuedMessage: QueuedMessage) {
         try {
             // Check if recipient is online
+            /*
             val isOnline = checkRecipientOnline(queuedMessage.recipientB32)
 
             if (!isOnline) {
                 handleRetryFailure(queuedMessage, "Recipient offline")
                 return
             }
+            */
 
             val result = messageManager.sendMessage(
                 queuedMessage.recipientB32,
                 queuedMessage.content,
-                queuedMessage.replyToId
+                queuedMessage.replyToId,
+                queuedMessage.createdAt
             )
 
             if (result.isSuccess) {

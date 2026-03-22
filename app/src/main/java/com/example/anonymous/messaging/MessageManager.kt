@@ -275,8 +275,13 @@ class MessageManager private constructor(context: Context) {
                         Log.i(TAG, "Accepted incoming connection from: $peerDest")
                         handleIncomingConnection(socket, peerDest)
                     } else {
+                        val error = result.exceptionOrNull()
+                        val isTimeout = error is java.net.SocketTimeoutException || error?.message?.contains("timed out", ignoreCase = true) == true
+
+                        if (isTimeout) continue
+
                         consecutiveFailures++
-                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${result.exceptionOrNull()?.message}")
+                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${error?.message}")
 
                         if (consecutiveFailures >= maxConsecutiveFailures) {
                             Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures — i2pd restarted. Triggering recovery.")
@@ -289,26 +294,30 @@ class MessageManager private constructor(context: Context) {
                         backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 } catch (e: Exception) {
-                    if (e !is CancellationException) {
-                        consecutiveFailures++
-                        Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+                    if (e is CancellationException) throw e
 
-                        if (consecutiveFailures >= maxConsecutiveFailures) {
-                            Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures. Triggering recovery.")
-                            samClient.removeSession(sessionId)
-                            _connectionState.value = ConnectionState.Error
-                            break
-                        }
+                    val isTimeout = e is java.net.SocketTimeoutException || e.message?.contains("timed out", ignoreCase = true) == true
 
-                        delay(backoffMs)
-                        backoffMs = minOf(backoffMs * 2, 30_000L)
+                    if (isTimeout) continue
+
+                    consecutiveFailures++
+                    Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+
+                    if (consecutiveFailures >= maxConsecutiveFailures) {
+                        Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures. Triggering recovery.")
+                        samClient.removeSession(sessionId)
+                        _connectionState.value = ConnectionState.Error
+                        break
                     }
+
+                    delay(backoffMs)
+                    backoffMs = minOf(backoffMs * 2, 30_000L)
                 }
             }
         }
     }
 
-    suspend fun sendMessage(contactB32: String, text: String, replyToId: String? = null): Result<Message> = withContext(Dispatchers.IO) {
+    suspend fun sendMessage(contactB32: String, text: String, replyToId: String? = null, timestamp: Long = System.currentTimeMillis()): Result<Message> = withContext(Dispatchers.IO) {
         return@withContext try {
             val messageId = UUID.randomUUID().toString()
             _messageStatus.emit(MessageStatus(messageId, Status.SENDING))
@@ -354,7 +363,7 @@ class MessageManager private constructor(context: Context) {
                 authTag = encryptedData.authTag,
                 dhPublicKey = dhPublicKey,
                 salt = Base64.encodeToString(salt, Base64.NO_WRAP),
-                timestamp = System.currentTimeMillis(),
+                timestamp = timestamp,
                 replyToId = replyToId,
                 messageId = messageId
             )
@@ -369,7 +378,7 @@ class MessageManager private constructor(context: Context) {
                 encryptedContent = encryptedData.ct,
                 senderId = myB32,
                 receiverId = contactB32,
-                timestamp = System.currentTimeMillis(),
+                timestamp = timestamp,
                 isRead = true,      // Outgoing
                 iv = encryptedData.iv,
                 authTag = encryptedData.authTag,
@@ -571,8 +580,12 @@ class MessageManager private constructor(context: Context) {
                         val (socket, peerDest) = result.getOrThrow()
                         handleIncomingConnection(socket, peerDest)
                     } else {
+                        val error = result.exceptionOrNull()
+                        val isTimeout = error is java.net.SocketTimeoutException || error?.message?.contains("timed out", ignoreCase = true) == true
+                        if (isTimeout) continue
+
                         consecutiveFailures++
-                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${result.exceptionOrNull()?.message}")
+                        Log.w(TAG, "acceptConnection failed ($consecutiveFailures/$maxConsecutiveFailures, backoff ${backoffMs}ms): ${error?.message}")
 
                         if (consecutiveFailures >= maxConsecutiveFailures) {
                             Log.e(TAG, "Session $sessionId dead after $consecutiveFailures failures. Triggering recovery.")
@@ -585,20 +598,23 @@ class MessageManager private constructor(context: Context) {
                         backoffMs = minOf(backoffMs * 2, 30_000L)
                     }
                 } catch (e: Exception) {
-                    if (e !is CancellationException) {
-                        consecutiveFailures++
-                        Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+                    if (e is CancellationException) throw e
 
-                        if (consecutiveFailures >= maxConsecutiveFailures) {
-                            Log.e(TAG, "Session $sessionId dead. Triggering recovery.")
-                            samClient.removeSession(sessionId)
-                            _connectionState.value = ConnectionState.Error
-                            break
-                        }
+                    val isTimeout = e is java.net.SocketTimeoutException || e.message?.contains("timed out", ignoreCase = true) == true
+                    if (isTimeout) continue
 
-                        delay(backoffMs)
-                        backoffMs = minOf(backoffMs * 2, 30_000L)
+                    consecutiveFailures++
+                    Log.e(TAG, "Error accepting connection ($consecutiveFailures/$maxConsecutiveFailures)", e)
+
+                    if (consecutiveFailures >= maxConsecutiveFailures) {
+                        Log.e(TAG, "Session $sessionId dead. Triggering recovery.")
+                        samClient.removeSession(sessionId)
+                        _connectionState.value = ConnectionState.Error
+                        break
                     }
+
+                    delay(backoffMs)
+                    backoffMs = minOf(backoffMs * 2, 30_000L)
                 }
             }
         }
