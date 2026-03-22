@@ -90,12 +90,23 @@ import coil.request.ImageRequest
 import com.example.anonymous.media.MediaChunkManager
 import com.example.anonymous.media.MediaLoadState
 import com.example.anonymous.repository.MessageRepository
+import com.example.anonymous.utils.LinkifyText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 sealed class IconType(val action: (String) -> String) {
-    data class Vector(val icon: ImageVector, val vectorAction: (String) -> String) : IconType(vectorAction)
+    data class Vector(val icon: ImageVector, val activeMarker: String, val vectorAction: (String) -> String) : IconType(vectorAction)
     data class Drawable(val resId: Int, val drawableAction: (String) -> String) : IconType(drawableAction)
+}
+
+private fun connectionStatusInfo(connectionStatus: I2pdDaemon.DaemonState, isConnected: Boolean): Pair<String, Color> = when(connectionStatus) {
+    I2pdDaemon.DaemonState.Idle -> "I2P Idle" to Color.Gray
+    I2pdDaemon.DaemonState.Starting -> "Starting I2P..." to Color.Yellow
+    I2pdDaemon.DaemonState.WaitingForNetwork -> "Waiting for network..." to Color.Yellow
+    I2pdDaemon.DaemonState.BuildingTunnels -> "Building tunnels..." to Color.Yellow
+    I2pdDaemon.DaemonState.Reseeding -> "Reseeding..." to Color.Yellow
+    I2pdDaemon.DaemonState.Ready -> if (isConnected) "Connected" to Color.Green else "Connecting..." to Color.Yellow
+    is I2pdDaemon.DaemonState.Error -> if (connectionStatus.isPermanent) "I2P Error (Permanent)" to Color.Red else "I2P Error" to Color.Red
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -110,7 +121,6 @@ fun ChatScreen(
     val messageRepository = remember { MessageRepository(context) }
     val messageManager = remember { MessageManager.getInstance(context) }
     val offlineManager = remember { OfflineMessageManager.getInstance(context) }
-    val i2pdDaemon = remember { I2pdDaemon.getInstance(context) }
     val contactRepository = remember { ContactRepository.getInstance(context) }
     val mediaManager = remember { MediaChunkManager.getInstance(context) }
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -122,6 +132,7 @@ fun ChatScreen(
     var isLoading by remember { mutableStateOf(false) }
     var isCodeFormat by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+
     val connectionState by messageManager.connectionState.collectAsState()
     val isConnected = connectionState == MessageManager.ConnectionState.Connected
     val connectionStatus = when (connectionState) {
@@ -130,25 +141,30 @@ fun ChatScreen(
         MessageManager.ConnectionState.Error -> I2pdDaemon.DaemonState.Error("Session error", false)
         MessageManager.ConnectionState.Disconnected -> I2pdDaemon.DaemonState.Idle
     }
-    var isInitializing by remember { mutableStateOf(false) }
 
     val iconList = listOf(
-        IconType.Vector(Icons.Default.Favorite, { text -> "❤️ $text ❤️" }),
-        IconType.Vector(Icons.Default.Face, { text -> "😊 $text 😊" }),
-        IconType.Vector(Icons.Default.PlayArrow, { text -> "▶️ $text" }),
-        IconType.Drawable(R.drawable.code_24px, { text ->
-            if (text.startsWith("```") && text.endsWith("```")) {
-                text.removeSurrounding("```")
-            } else {
-                "```\n$text\n```"
-            }
-        })
+        IconType.Vector(Icons.Default.Favorite, activeMarker = "❤️") { text ->
+            if (text.startsWith("❤️") && text.endsWith("❤️")) text.removeSurrounding("❤️ ", " ❤️")
+            else "❤️ $text ❤️"
+        },
+        IconType.Vector(Icons.Default.Face, activeMarker = "😊") { text ->
+            if (text.startsWith("😊") && text.endsWith("😊")) text.removeSurrounding("😊 ", " 😊")
+            else "😊 $text 😊"
+        },
+        IconType.Vector(Icons.Default.PlayArrow, activeMarker = "▶️") { text ->
+            if (text.startsWith("▶️ ")) text.removePrefix("▶️ ")
+            else "▶️ $text"
+        },
+        IconType.Drawable(R.drawable.code_24px) { text ->
+            if (text.startsWith("```") && text.endsWith("```")) text.removeSurrounding("```")
+            else "```\n$text\n```"
+        }
     )
 
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? -> selectedUri = uri }
 
-    val gifLoader = remember {
-        ImageLoader.Builder(context)
+    val gifLoader = remember(context.applicationContext) {
+        ImageLoader.Builder(context.applicationContext)
             .components {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) add(ImageDecoderDecoder.Factory())
                 else add(GifDecoder.Factory())
@@ -177,38 +193,17 @@ fun ChatScreen(
     }
 
     // Listen for message status updates
-    LaunchedEffect(messageManager) {
+    LaunchedEffect(messageManager, contactId) {
         messageManager.messageStatus.collect { status ->
             if (status.status == MessageManager.Status.SENT || status.status == MessageManager.Status.DELIVERED) {
-                val updated = withContext(Dispatchers.IO) {
+                messages = withContext(Dispatchers.IO) {
                     messageRepository.getMessagesForContact(contactId)
                 }
-                messages = updated
             }
         }
     }
 
-    @Composable
-    fun getConnectionStatusText(): Pair<String, Color> {
-        return when (connectionStatus) {
-            I2pdDaemon.DaemonState.Idle -> "I2P Idle" to Color.Gray
-            I2pdDaemon.DaemonState.Starting -> "Starting I2P..." to Color.Yellow
-            I2pdDaemon.DaemonState.WaitingForNetwork -> "Waiting for network..." to Color.Yellow
-            I2pdDaemon.DaemonState.BuildingTunnels -> "Building tunnels..." to Color.Yellow
-            I2pdDaemon.DaemonState.Ready -> {
-                if (messageManager.connectionState.collectAsState().value == MessageManager.ConnectionState.Connected) {
-                    "Connected (I2P)" to Color.Green
-                } else {
-                    "Connecting..." to Color.Yellow
-                }
-            }
-            is I2pdDaemon.DaemonState.Error -> {
-                val isPermanent = (connectionStatus as? I2pdDaemon.DaemonState.Error)?.isPermanent ?: false
-                if (isPermanent) "I2P Error (Permanent)" to Color.Red else "I2P Error" to Color.Red
-            }
-            I2pdDaemon.DaemonState.Reseeding -> "RESEEDING" to Color.Yellow
-        }
-    }
+    val (statusText, statusColor) = connectionStatusInfo(connectionStatus, isConnected)
 
     Scaffold(
         topBar = {
@@ -216,7 +211,6 @@ fun ChatScreen(
                 title = {
                     Column {
                         Text("Chat with $contactName")
-                        val (statusText, statusColor) = getConnectionStatusText()
                         Text(
                             text = statusText,
                             style = MaterialTheme.typography.bodySmall,
@@ -245,7 +239,7 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 reverseLayout = true
             ) {
-                items(messages.reversed()) { msg ->
+                items(messages, key = { it.id }) { msg ->
                     ChatMessage(
                         message = msg,
                         settings = customizationSettings,
@@ -468,20 +462,8 @@ fun ChatMessage(
                 }
 
                 if (message.content.isNotBlank() && message.content != "media") {
-                    Text(
+                    LinkifyText(
                         text = message.content,
-                        style = MaterialTheme.typography.bodyLarge.copy(
-                            color = if (isCode) Color.White else Color.Black,
-                            fontSize = if (isCode) 12.sp else 14.sp,
-                            fontFamily = if (isCode) MaterialTheme.typography.bodyMedium.fontFamily else null
-                        ),
-                        modifier = Modifier
-                            .padding(bottom = 4.dp)
-                            .background(
-                                if (isCode) Color.DarkGray.copy(alpha = 0.8f) else Color.Transparent,
-                                RoundedCornerShape(4.dp)
-                            )
-                            .padding(if (isCode) 8.dp else 0.dp)
                     )
                 }
 
