@@ -39,6 +39,7 @@ import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.util.concurrent.CopyOnWriteArrayList
+import androidx.core.content.edit
 
 class CommunityHostService : Service() {
     override fun onBind(p0: Intent?): IBinder? = null
@@ -53,13 +54,15 @@ class CommunityHostService : Service() {
     private val replayBuffer = ArrayDeque<String>(REPLAY_BUFFER_SIZE)
     private val replayLock = Any()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var wakeLock: PowerManager.WakeLock? = null
     private val json = Json { ignoreUnknownKeys = true }
     private lateinit var mediaManager: MediaChunkManager
     private var currentCommunityB32: String? = null
 
+    @Volatile private var currentHostSession: SAMClient.SAMSession? = null
     @Volatile private var isLoopRunning = false
+    @Volatile private var loopGeneration = 0
     @Volatile private var communityGroupKey: ByteArray? = null
 
     companion object {
@@ -87,6 +90,7 @@ class CommunityHostService : Service() {
         }
 
         @Volatile var localPacketSink: ((String) -> Unit)? = null
+        @Volatile var hostSessionActive: Boolean = false
     }
 
     override fun onCreate() {
@@ -119,6 +123,11 @@ class CommunityHostService : Service() {
 
         if (wakeLock?.isHeld != true) acquireWakeLock()
 
+        if (!scope.isActive) {
+            Log.i(TAG, "Scope was cancelled - rebuilding for new start")
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        }
+
         localPacketSink = ::injectLocalPacket
 
         val communityChanged = currentCommunityB32 != null && currentCommunityB32 != communityId
@@ -131,7 +140,8 @@ class CommunityHostService : Service() {
                 scope.coroutineContext[Job]?.children?.forEach { it.cancel() }
             }
             isLoopRunning = true
-            scope.launch { runHostLoop(communityId) }
+            val gen = ++loopGeneration
+            scope.launch { runHostLoop(communityId, gen) }
         } else {
             Log.d(TAG, "Host loop already running for $communityId - skipping duplicate launch")
         }
@@ -141,8 +151,13 @@ class CommunityHostService : Service() {
 
     override fun onDestroy() {
         localPacketSink = null
+        hostSessionActive = false
         isLoopRunning = false
         communityGroupKey = null
+        currentHostSession?.let {
+            runCatching { SAMClient.getInstance().removeSession(it.id) }
+            currentHostSession = null
+        }
         releaseWakeLock()
         scope.cancel()
         super.onDestroy()
@@ -156,17 +171,20 @@ class CommunityHostService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
-    private suspend fun runHostLoop(communityB32: String) {
-        val community = CommunityRepository.getInstance(this).getByB32(communityB32)
+    private suspend fun runHostLoop(communityB32: String, generation: Int) {
+        var community = CommunityRepository.getInstance(this).getByB32(communityB32)
         if (community == null) {
-            Log.e(TAG, "Community $communityB32 not found - stopping")
-            isLoopRunning = false
-            stopSelf()
-            return
+            Log.w(TAG, "Community $communityB32 not found on first lookup - waiting for DataStore flush...")
+            var retries = 0
+            while (community == null && retries < 10 && scope.isActive) {
+                delay(500L)
+                community = CommunityRepository.getInstance(this).getByB32(communityB32)
+                retries++
+            }
         }
-        if (community.samPrivateKey == null) {
-            Log.e(TAG, "Community has no private key - not the creator's device?")
-            isLoopRunning = false
+        if (community == null) {
+            Log.e(TAG, "Community $communityB32 not found after retries - stopping")
+            if (loopGeneration == generation) isLoopRunning = false
             stopSelf()
             return
         }
@@ -177,23 +195,14 @@ class CommunityHostService : Service() {
         val sam = SAMClient.getInstance()
         updateNotification("Hosting ${community.name}")
 
-        var samReady = runCatching { sam.connect() }.getOrDefault(false)
-        if (!samReady) {
-            Log.d(TAG, "SAM not immediately ready - waiting up to 30s")
-            var waited = 0
-            while (scope.isActive && waited < 15 && !samReady) {
-                delay(2_000L)
-                waited++
-                samReady = runCatching { sam.connect() }.getOrDefault(false)
-            }
-        }
-        if (!samReady) {
-            Log.e(TAG, "SAM not reachable after 30s - stopping host service")
-            isLoopRunning = false
-            stopSelf()
+        val tunnelsReady = waitForTunnelsReady(sam, 300_000L)
+        if (!tunnelsReady) {
+            Log.e(TAG, "Timed out waiting for I2P tunnels via service restart")
+            if (loopGeneration == generation) isLoopRunning = false
+            delay(30_000L)
+            start(this, communityB32)
             return
         }
-        Log.i(TAG, "SAM ready - starting host session for ${community.name}")
 
         var session: SAMClient.SAMSession? = null
         var retryDelay = 10_000L
@@ -202,7 +211,16 @@ class CommunityHostService : Service() {
             while (scope.isActive) {
                 // Session creation
                 try {
+                    Log.i(TAG, "Creating host session for ${community.name} (this can take 1-3min)...")
                     session = sam.createStreamSession(community.samPrivateKey).getOrThrow()
+                    currentHostSession = session
+                    if (session.b32Address != community.b32Address) {
+                        Log.e(TAG, "WRONG SESSION ADDRESS: got ${session.b32Address}, expected ${community.b32Address}. Private key mismatch!")
+                        sam.removeSession(session.id)
+                        session = null
+                        delay(retryDelay)
+                        continue
+                    }
                     Log.i(TAG, "Host session open: ${session.b32Address} (expected: ${community.b32Address})")
                     retryDelay = 10_000L
                 } catch (_: CancellationException) {
@@ -214,22 +232,34 @@ class CommunityHostService : Service() {
                     continue
                 }
 
+                val leaseSetReady = waitForLeaseSetPropagation(sam, session.b32Address, 180_000L)
+                if (!leaseSetReady) {
+                    Log.w(TAG, "LeaseSet not confirmed after 3min - proceeding anyway")
+                } else {
+                    Log.i(TAG, "LeaseSet confirmed - members can connect")
+                }
+
                 // Accept loop
+                hostSessionActive = true
+                Log.i(TAG, "Accept loop started - hostSessionActive=true")
                 while (scope.isActive) {
                     try {
                         val (socket, peerDest) = sam.acceptConnection(session!!.id).getOrThrow()
                         Log.i(TAG, "New member connected (${peerDest.take(20)}...)")
                         scope.launch { handleMember(socket, peerDest) }
-
                     } catch (_: CancellationException) {
                         return
                     } catch (e: Exception) {
-                        val sessionSocketDead = session!!.sessionSocket.isClosed
+                        if (!scope.isActive) return
+
+                        val sessionDead = session!!.sessionSocket.isClosed
                         val samUnreachable = !runCatching { sam.connect() }.getOrDefault(true)
 
-                        if (sessionSocketDead || samUnreachable) {
-                            Log.e(TAG, "Session dead (socketClosed=$sessionSocketDead, samDown=$samUnreachable: ${e.message}")
+                        if (sessionDead || samUnreachable) {
+                            Log.e(TAG, "Session dead (socketClosed=$sessionDead, samDown=$samUnreachable): ${e.message}")
+                            hostSessionActive = false
                             runCatching { sam.removeSession(session.id) }
+                            currentHostSession = null
                             session = null
                             delay(retryDelay)
                             retryDelay = minOf(retryDelay * 2, 120_000L)
@@ -242,8 +272,12 @@ class CommunityHostService : Service() {
                 }
             }
         } finally {
+            if (loopGeneration == generation) {
+                isLoopRunning = false
+                hostSessionActive = false
+            }
             session?.let { runCatching { sam.removeSession(it.id) } }
-            isLoopRunning = false
+            if (currentHostSession?.id == session?.id) currentHostSession = null
         }
 
         Log.i(TAG, "Host loop exited cleanly")
@@ -408,12 +442,45 @@ class CommunityHostService : Service() {
 
     private fun persistB32(b32: String) {
         getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(PREF_KEY_B32, b32)
-            .apply()
+            .edit {
+                putString(PREF_KEY_B32, b32)
+            }
     }
 
     private fun loadPersistedB32(): String? = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(PREF_KEY_B32, null)
+
+    private suspend fun waitForTunnelsReady(sam: SAMClient, timeout: Long = 300_000L): Boolean {
+        val deadline = System.currentTimeMillis() + timeout
+        var attempt = 0
+        Log.i(TAG, "Waiting for I2P tunnels to be ready...")
+        while (scope.isActive && System.currentTimeMillis() < deadline) {
+            attempt++
+            val probe = runCatching { sam.createStreamSession(savedPrivateKey = null).getOrThrow() }
+            if (probe.isSuccess) {
+                sam.removeSession(probe.getOrThrow().id)
+                Log.i(TAG, "Tunnels ready after $attempt attempts")
+                return true
+            }
+            Log.d(TAG, "Tunnels probe attempt $attempt failed - retrying in 10s")
+            delay(10_000L)      // 10s
+        }
+        return false
+    }
+
+    private suspend fun waitForLeaseSetPropagation(sam: SAMClient, b32: String, timeout: Long): Boolean = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + timeout
+        var attempt = 0
+        while (scope.isActive && System.currentTimeMillis() < deadline) {
+            attempt++
+            if (sam.namingLookup(b32).isSuccess) {
+                Log.i(TAG, "LeaseSet visible after $attempt attempts")
+                return@withContext true
+            }
+            Log.d(TAG, "LeaseSet not visible yet (attempt $attempt)...")
+            delay(10_000L)
+        }
+        false
+    }
 
     // WakeLock
 
