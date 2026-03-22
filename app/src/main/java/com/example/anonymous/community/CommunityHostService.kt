@@ -1,21 +1,9 @@
 package com.example.anonymous.community
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
-import android.content.Intent
-import android.content.pm.ServiceInfo
-import android.os.Build
-import android.os.IBinder
-import android.os.PowerManager
 import android.util.Base64
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.example.anonymous.MainActivity
-import com.example.anonymous.R
+import androidx.core.content.edit
 import com.example.anonymous.i2p.SAMClient
 import com.example.anonymous.media.MediaChunkManager
 import com.example.anonymous.media.MediaProtocol
@@ -34,15 +22,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.BufferedReader
-import java.net.Socket
 import java.io.BufferedWriter
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.net.Socket
 import java.util.concurrent.CopyOnWriteArrayList
-import androidx.core.content.edit
 
-class CommunityHostService : Service() {
-    override fun onBind(p0: Intent?): IBinder? = null
+class CommunityHostService private constructor(private val context: Context) {
 
     private data class MemberSocket(
         val writer: BufferedWriter,
@@ -50,14 +36,12 @@ class CommunityHostService : Service() {
     )
 
     private val activeMembers = CopyOnWriteArrayList<MemberSocket>()
-
     private val replayBuffer = ArrayDeque<String>(REPLAY_BUFFER_SIZE)
     private val replayLock = Any()
 
     private var scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var wakeLock: PowerManager.WakeLock? = null
     private val json = Json { ignoreUnknownKeys = true }
-    private lateinit var mediaManager: MediaChunkManager
+    private val mediaManager = MediaChunkManager.getInstance(context)
     private var currentCommunityB32: String? = null
 
     @Volatile private var currentHostSession: SAMClient.SAMSession? = null
@@ -67,62 +51,27 @@ class CommunityHostService : Service() {
 
     companion object {
         private const val TAG = "CommunityHostService"
-        private const val NOTIFICATION_ID = 2
-        private const val CHANNEL_ID = "community_host"
-        private const val WAKELOCK_TAG = "Anonymous:CommunityHostWakeLock"
         private const val REPLAY_BUFFER_SIZE = 100
         private const val PREFS_NAME = "community_host_prefs"
         private const val PREF_KEY_B32 = "persisted_community_b32"
-        const val EXTRA_COMMUNITY_B32 = "community_b32"
-        const val EXTRA_INJECT_PACKET = "inject_packet"
+
+        @Volatile private var instance: CommunityHostService? = null
+
+        fun getInstance(context: Context): CommunityHostService = instance ?: synchronized(this) { instance ?: CommunityHostService(context.applicationContext).also { instance = it } }
 
         fun start(context: Context, communityB32: String) {
-            val intent = Intent(context, CommunityHostService::class.java)
-                .putExtra(EXTRA_COMMUNITY_B32, communityB32)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                context.startForegroundService(intent)
-            else
-                context.startService(intent)
+            getInstance(context).startHosting(communityB32)
         }
 
         fun stop(context: Context) {
-            context.stopService(Intent(context, CommunityHostService::class.java))
+            getInstance(context).stopHosting()
         }
 
         @Volatile var localPacketSink: ((String) -> Unit)? = null
         @Volatile var hostSessionActive: Boolean = false
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        mediaManager = MediaChunkManager.getInstance(this)
-        createNotificationChannel()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID, buildNotification("Starting…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIFICATION_ID, buildNotification("Starting…"))
-        }
-
-        acquireWakeLock()
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent?.getStringExtra(EXTRA_INJECT_PACKET)?.let { rawPacket ->
-            injectLocalPacket(rawPacket)
-            return START_REDELIVER_INTENT
-        }
-
-        val communityId = intent?.getStringExtra(EXTRA_COMMUNITY_B32) ?: currentCommunityB32 ?: loadPersistedB32()
-        if (communityId == null) {
-            Log.e(TAG, "Started without community ID - stopping")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        persistB32(communityId)
-
-        if (wakeLock?.isHeld != true) acquireWakeLock()
-
+    private fun startHosting(communityId: String) {
         if (!scope.isActive) {
             Log.i(TAG, "Scope was cancelled - rebuilding for new start")
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -131,8 +80,8 @@ class CommunityHostService : Service() {
         localPacketSink = ::injectLocalPacket
 
         val communityChanged = currentCommunityB32 != null && currentCommunityB32 != communityId
-
         currentCommunityB32 = communityId
+        persistB32(communityId)
 
         if (!isLoopRunning || communityChanged) {
             if (communityChanged) {
@@ -141,15 +90,14 @@ class CommunityHostService : Service() {
             }
             isLoopRunning = true
             val gen = ++loopGeneration
+            Log.i(TAG, "Launching runHostLoop gen=$gen for $communityId")
             scope.launch { runHostLoop(communityId, gen) }
         } else {
-            Log.d(TAG, "Host loop already running for $communityId - skipping duplicate launch")
+            Log.i(TAG, "Host loop already running for $communityId (gen=$loopGeneration) - skipping relaunch")
         }
-
-        return START_REDELIVER_INTENT
     }
 
-    override fun onDestroy() {
+    private fun stopHosting() {
         localPacketSink = null
         hostSessionActive = false
         isLoopRunning = false
@@ -158,129 +106,157 @@ class CommunityHostService : Service() {
             runCatching { SAMClient.getInstance().removeSession(it.id) }
             currentHostSession = null
         }
-        releaseWakeLock()
         scope.cancel()
-        super.onDestroy()
-    }
-
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        val intent = Intent(this, CommunityHostService::class.java).apply {
-            currentCommunityB32?.let { putExtra(EXTRA_COMMUNITY_B32, it) }
-        }
-        startService(intent)
-        super.onTaskRemoved(rootIntent)
     }
 
     private suspend fun runHostLoop(communityB32: String, generation: Int) {
-        var community = CommunityRepository.getInstance(this).getByB32(communityB32)
+        Log.i(TAG, "runHostLoop START gen=$generation b32=$communityB32")
+        try {
+            runHostLoopInner(communityB32, generation)
+        } catch (e: CancellationException) {
+            Log.i(TAG, "runHostLoop CANCELLED gen=$generation")
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "runHostLoop CRASHED unexpectedly gen=$generation: ${e.message}", e)
+        } finally {
+            if (loopGeneration == generation) {
+                isLoopRunning = false
+                hostSessionActive = false
+            }
+            Log.i(TAG, "runHostLoop DONE gen=$generation isLoopRunning=$isLoopRunning")
+        }
+    }
+
+    private suspend fun runHostLoopInner(communityB32: String, generation: Int) {
+        // Find Community
+        var community = CommunityRepository.getInstance(context).getByB32(communityB32)
         if (community == null) {
-            Log.w(TAG, "Community $communityB32 not found on first lookup - waiting for DataStore flush...")
+            Log.w(TAG, "Community not found on first lookup - waiting for DataStore flush...")
             var retries = 0
             while (community == null && retries < 10 && scope.isActive) {
                 delay(500L)
-                community = CommunityRepository.getInstance(this).getByB32(communityB32)
+                community = CommunityRepository.getInstance(context).getByB32(communityB32)
                 retries++
             }
         }
         if (community == null) {
             Log.e(TAG, "Community $communityB32 not found after retries - stopping")
-            if (loopGeneration == generation) isLoopRunning = false
-            stopSelf()
+            return
+        }
+        Log.i(
+            TAG,
+            "Community found: '${community.name}' samKey=${if (community.samPrivateKey != null) "present" else "MISSING"}"
+        )
+
+        // Validate & Cache GroupKey
+        val groupKey = try {
+            Base64.decode(community.groupKeyBase64, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "Invalid groupKeyBase64 - cannot host: ${e.message}")
+            return
+        }
+        communityGroupKey = groupKey
+
+        if (community.samPrivateKey == null) {
+            Log.e(
+                TAG,
+                "Community '${community.name}' has no SAM private key - only the creator can host"
+            )
             return
         }
 
-        // Cache GroupKey
-        communityGroupKey = Base64.decode(community.groupKeyBase64, Base64.NO_WRAP)
-
         val sam = SAMClient.getInstance()
-        updateNotification("Hosting ${community.name}")
 
-        val tunnelsReady = waitForTunnelsReady(sam, 300_000L)
-        if (!tunnelsReady) {
-            Log.e(TAG, "Timed out waiting for I2P tunnels via service restart")
-            if (loopGeneration == generation) isLoopRunning = false
-            delay(30_000L)
-            start(this, communityB32)
+        val samReady = waitForSamBridge(sam, 300_000L)
+        if (!samReady) {
+            Log.e(TAG, "SAM bridge not reachable after 5min - giving up")
             return
         }
 
         var session: SAMClient.SAMSession? = null
         var retryDelay = 10_000L
 
-        try {
-            while (scope.isActive) {
-                // Session creation
-                try {
-                    Log.i(TAG, "Creating host session for ${community.name} (this can take 1-3min)...")
-                    session = sam.createStreamSession(community.samPrivateKey).getOrThrow()
-                    currentHostSession = session
-                    if (session.b32Address != community.b32Address) {
-                        Log.e(TAG, "WRONG SESSION ADDRESS: got ${session.b32Address}, expected ${community.b32Address}. Private key mismatch!")
-                        sam.removeSession(session.id)
-                        session = null
-                        delay(retryDelay)
-                        continue
-                    }
-                    Log.i(TAG, "Host session open: ${session.b32Address} (expected: ${community.b32Address})")
-                    retryDelay = 10_000L
-                } catch (_: CancellationException) {
-                    break
-                } catch (e: Exception) {
-                    Log.e(TAG, "Session creation failed: ${e.message} - retry in ${retryDelay / 1000}s")
+        while (scope.isActive && loopGeneration == generation) {
+            // Session creation
+            try {
+                Log.i(
+                    TAG,
+                    "Creating host SAM session for '${community.name}' (may take 30-90 s)..."
+                )
+                session = sam.createStreamSession(community.samPrivateKey).getOrThrow()
+                currentHostSession = session
+                if (!session.b32Address.equals(community.b32Address, ignoreCase = true)) {
+                    Log.e(
+                        TAG,
+                        "Address mismatch: session=${session.b32Address} expected=${community.b32Address} - key mismatch?"
+                    )
+                    sam.removeSession(session.id)
+                    currentHostSession = null
+                    session = null
                     delay(retryDelay)
                     retryDelay = minOf(retryDelay * 2, 120_000L)
                     continue
                 }
+                Log.i(TAG, "Host SAM session ready: ${session.b32Address}")
 
-                val leaseSetReady = waitForLeaseSetPropagation(sam, session.b32Address, 180_000L)
-                if (!leaseSetReady) {
-                    Log.w(TAG, "LeaseSet not confirmed after 3min - proceeding anyway")
-                } else {
-                    Log.i(TAG, "LeaseSet confirmed - members can connect")
-                }
-
-                // Accept loop
                 hostSessionActive = true
-                Log.i(TAG, "Accept loop started - hostSessionActive=true")
-                while (scope.isActive) {
-                    try {
-                        val (socket, peerDest) = sam.acceptConnection(session!!.id).getOrThrow()
-                        Log.i(TAG, "New member connected (${peerDest.take(20)}...)")
-                        scope.launch { handleMember(socket, peerDest) }
-                    } catch (_: CancellationException) {
-                        return
-                    } catch (e: Exception) {
-                        if (!scope.isActive) return
+                retryDelay = 10_000L
 
-                        val sessionDead = session!!.sessionSocket.isClosed
-                        val samUnreachable = !runCatching { sam.connect() }.getOrDefault(true)
+                // LeaseSet
+                val capturedSession = session
+                scope.launch {
+                    val ready =
+                        waitForLeaseSetPropagation(sam, capturedSession.b32Address, 180_000L)
+                    if (ready) Log.i(TAG, "LeaseSet confirmed - members can now connect")
+                    else Log.w(
+                        TAG,
+                        "LeaseSet not confirmed after 3min - members will retry on their own"
+                    )
+                }
+            } catch (_: CancellationException) {
+                break
+            } catch (e: Exception) {
+                Log.e(TAG, "Session creation failed: ${e.message} - retry in ${retryDelay / 1000}s")
+                hostSessionActive = false
+                delay(retryDelay)
+                retryDelay = minOf(retryDelay * 2, 120_000L)
+                continue
+            }
 
-                        if (sessionDead || samUnreachable) {
-                            Log.e(TAG, "Session dead (socketClosed=$sessionDead, samDown=$samUnreachable): ${e.message}")
-                            hostSessionActive = false
-                            runCatching { sam.removeSession(session.id) }
-                            currentHostSession = null
-                            session = null
-                            delay(retryDelay)
-                            retryDelay = minOf(retryDelay * 2, 120_000L)
-                            break
-                        } else {
-                            Log.w(TAG, "Accept failed but session alive - retrying in 2s: ${e.message}")
-                            delay(2_000L)
-                        }
+            // Accept loop
+            Log.i(TAG, "Accept loop started for '${community.name}'")
+            while (scope.isActive && loopGeneration == generation) {
+                try {
+                    val (socket, peerDest) = sam.acceptConnection(session!!.id).getOrThrow()
+                    Log.i(TAG, "New member connected (${peerDest.take(20)}...)")
+                    scope.launch { handleMember(socket, peerDest) }
+                } catch (_: CancellationException) {
+                    return
+                } catch (e: Exception) {
+                    if (!scope.isActive || loopGeneration != generation) return
+
+                    val sessionDead = session?.sessionSocket?.isClosed ?: true
+
+                    if (sessionDead) {
+                        Log.e(TAG, "Session dead (closed=$sessionDead): ${e.message}")
+                        hostSessionActive = false
+                        session?.id?.let { runCatching { sam.removeSession(it) } }
+                        currentHostSession = null
+                        session = null
+                        delay(retryDelay)
+                        retryDelay = minOf(retryDelay * 2, 120_000L)
+                        break
+                    } else {
+                        Log.w(TAG, "No peer connected yet - continuing to wait")
                     }
                 }
             }
-        } finally {
-            if (loopGeneration == generation) {
-                isLoopRunning = false
-                hostSessionActive = false
-            }
-            session?.let { runCatching { sam.removeSession(it.id) } }
-            if (currentHostSession?.id == session?.id) currentHostSession = null
         }
 
-        Log.i(TAG, "Host loop exited cleanly")
+        // Cleanup
+        session?.let { runCatching { sam.removeSession(it.id) } }
+        if (currentHostSession?.id == session?.id) currentHostSession = null
+        Log.i(TAG, "Host loop exited cleanly gen=$generation")
     }
 
     private suspend fun handleMember(socket: Socket, peerDest: String) = withContext(Dispatchers.IO) {
@@ -289,8 +265,6 @@ class CommunityHostService : Service() {
         val member = MemberSocket(writer, peerDest)
 
         activeMembers.add(member)
-        updateNotification("Hosting · ${activeMembers.size} members online")
-
         try {
             replayHistory(writer)
 
@@ -303,7 +277,6 @@ class CommunityHostService : Service() {
         } finally {
             activeMembers.remove(member)
             runCatching { socket.close() }
-            updateNotification("Hosting · ${activeMembers.size} members online")
             Log.i(TAG, "Member disconnected. Remaining: ${activeMembers.size}")
         }
     }
@@ -320,7 +293,7 @@ class CommunityHostService : Service() {
             when (packet.type) {
                 MediaProtocol.TYPE_MEDIA_META -> {
                     packet.meta?.let { mediaManager.registerMeta(it) }
-                    appendToReplayBuffer(raw)       // meta is small - replay it
+                    appendToReplayBuffer(raw)
                     fanOut(raw, excluding = from)
                 }
 
@@ -359,6 +332,7 @@ class CommunityHostService : Service() {
                         Log.w(TAG, "MEDIA_GET for $mediaId chunk $index - not in cache yet")
                     }
                 }
+
                 else -> {
                     appendToReplayBuffer(raw)
                     fanOut(raw, excluding = from)
@@ -376,7 +350,7 @@ class CommunityHostService : Service() {
         scope.launch {
             try {
                 val plaintext = CommunityEncryption.decrypt(packet.payload, key)
-                CommunityRepository.getInstance(this@CommunityHostService).addMessage(
+                CommunityRepository.getInstance(context).addMessage(
                     CommunityMessage(
                         id = "${packet.senderB32.take(8)}_${packet.timestamp}",
                         senderB32 = packet.senderB32,
@@ -435,34 +409,30 @@ class CommunityHostService : Service() {
                 appendToReplayBuffer(raw)
             }
         } catch (_: Exception) {
-            appendToReplayBuffer(raw)   // unknown format
+            appendToReplayBuffer(raw)
         }
         fanOut(raw, excluding = null)
     }
 
     private fun persistB32(b32: String) {
-        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit {
                 putString(PREF_KEY_B32, b32)
             }
     }
 
-    private fun loadPersistedB32(): String? = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(PREF_KEY_B32, null)
-
-    private suspend fun waitForTunnelsReady(sam: SAMClient, timeout: Long = 300_000L): Boolean {
+    private suspend fun waitForSamBridge(sam: SAMClient, timeout: Long = 300_000L): Boolean {
         val deadline = System.currentTimeMillis() + timeout
         var attempt = 0
-        Log.i(TAG, "Waiting for I2P tunnels to be ready...")
+        Log.i(TAG, "Waiting for SAM bridge to be reachable...")
         while (scope.isActive && System.currentTimeMillis() < deadline) {
             attempt++
-            val probe = runCatching { sam.createStreamSession(savedPrivateKey = null).getOrThrow() }
-            if (probe.isSuccess) {
-                sam.removeSession(probe.getOrThrow().id)
-                Log.i(TAG, "Tunnels ready after $attempt attempts")
+            if (sam.connect()) {
+                Log.i(TAG, "SAM bridge reachable (attempt $attempt)")
                 return true
             }
-            Log.d(TAG, "Tunnels probe attempt $attempt failed - retrying in 10s")
-            delay(10_000L)      // 10s
+            Log.d(TAG, "SAM bridge not ready yet (attempt $attempt) - retrying in 5s")
+            delay(5_000L)      // 5s
         }
         return false
     }
@@ -480,57 +450,5 @@ class CommunityHostService : Service() {
             delay(10_000L)
         }
         false
-    }
-
-    // WakeLock
-
-    private fun acquireWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) return
-            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply { acquire() }
-        } catch (e: Exception) { Log.e(TAG, "WakeLock acquire failed: ${e.message}") }
-    }
-
-    private fun releaseWakeLock() {
-        try { if (wakeLock?.isHeld == true) wakeLock?.release() } catch (_: Exception) { }
-    }
-
-    // Notification
-
-    private fun updateNotification(text: String) {
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(text))
-    }
-
-    private fun buildNotification(text: String = "Community host active"): Notification {
-        val pi = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Community Host")
-            .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setSilent(true)
-            .build()
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID, "Community Host Service", NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Keep your community relay running"
-                setShowBadge(false); enableLights(false); enableVibration(false)
-            }
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
     }
 }
