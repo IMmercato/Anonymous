@@ -24,6 +24,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -33,9 +34,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -55,7 +58,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.net.toUri
+import com.example.anonymous.community.CommunityHostService
 import com.example.anonymous.network.model.Community
+import com.example.anonymous.repository.CommunityRepository
 
 class MainActivity : ComponentActivity() {
 
@@ -142,6 +147,28 @@ class MainActivity : ComponentActivity() {
         Log.i("MainActivity", "onDestroy - NOT stopping I2P")
     }
 }
+
+private suspend fun restartCommunityHostServices(context: Context) {
+    val creatorCommunities = withContext(Dispatchers.IO) {
+        CommunityRepository.getInstance(context).getAllCreatorCommunities()
+    }
+    if (creatorCommunities.isEmpty()) return
+    Log.i("Main Activity", "Restarting host service for ${creatorCommunities.size} creator community/ies")
+    creatorCommunities.forEach { community ->
+        CommunityHostService.start(context, community.b32Address)
+    }
+}
+
+// Guide
+private const val PREFS_ONBOARDING = "onboarding"
+private const val KEY_GUIDE_SEEN = "guide_seen"
+
+private fun hadSeenGuide(context: Context): Boolean = context.getSharedPreferences(PREFS_ONBOARDING, Context.MODE_PRIVATE).getBoolean(KEY_GUIDE_SEEN, false)
+private fun markGuideSeen(context: Context) {
+    context.getSharedPreferences(PREFS_ONBOARDING, Context.MODE_PRIVATE)
+        .edit { putBoolean(KEY_GUIDE_SEEN, true) }
+}
+
 
 @Composable
 fun SplashScreen(navController: NavHostController) {
@@ -293,14 +320,19 @@ fun MainScreen(navController: NavHostController) {
 
     var hasConnectedOnce by remember { mutableStateOf(false) }
 
+    // Guide state
+    var showGuide by remember { mutableStateOf(!hadSeenGuide(context)) }
+    var guideStep by remember { mutableStateOf(0) }
+
     LaunchedEffect(retryKey) {
         isConnecting = true
         connectionError = null
 
-        val existingSession = samClient.getActiveSessions().lastOrNull()
+        val existingSession = samClient.getIdentitySession() ?: samClient.getActiveSessions().firstOrNull { it.style == SAMClient.SessionStyle.STREAM }
         if (existingSession != null) {
             Log.i("MainScreen", "Reusing registration session: ${existingSession.id}")
             messageManager.startListening(existingSession.id)
+            restartCommunityHostServices(context)
             return@LaunchedEffect
         }
 
@@ -336,8 +368,11 @@ fun MainScreen(navController: NavHostController) {
             return@LaunchedEffect
         }
 
+        samClient.markAsIdentitySession(session.id)
+
         Log.i("MainScreen", "Recreated session after i2pd restart: ${session.id}")
         messageManager.startListening(session.id)
+        restartCommunityHostServices(context)
     }
 
     val connectionState by messageManager.connectionState.collectAsState()
@@ -361,131 +396,231 @@ fun MainScreen(navController: NavHostController) {
         }
     }
 
-    if (isConnecting) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                CircularProgressIndicator()
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("Connecting to I2P network...", style = MaterialTheme.typography.bodyMedium)
-                connectionError?.let {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Error: $it", color = Color.Red, fontSize = 12.sp)
-                }
-            }
-        }
-    } else if (connectionError != null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Failed to connect", color = Color.Red)
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(onClick = {
-                    retryKey++
-                }) {
-                    Text("Retry")
-                }
-            }
-        }
-    } else {
-        if (selectedCommunity != null) {
-            CommunityScreen(
-                community = selectedCommunity!!,
-                onBack = { selectedCommunity = null },
-                customization = communityCustomizationSettings
-            )
-        } else if (selectedContact != null) {
-            ChatScreen(
-                contactId = selectedContact!!.b32Address,
-                contactName = selectedContact!!.name,
-                customizationSettings = chatCustomizationSettings,
-                onBack = { selectedContact = null }
-            )
-        } else {
-            Scaffold(
-                modifier = Modifier.fillMaxSize(),
-                topBar = {
-                    TopAppBar(
-                        title = { Text("Anonymous") },
-                        actions = {
-                            IconButton(onClick = {
-                                iconScale = 1.2f
-                                coroutineScope.launch {
-                                    delay(200)
-                                    iconScale = 1f
-                                }
-                                if (accountIcon == Icons.Default.Person) {
-                                    showCustomHome = true
-                                    accountIcon = Icons.Default.Face
-                                } else {
-                                    showCustomHome = false
-                                    accountIcon = Icons.Default.Person
-                                }
-                            }) {
-                                Icon(imageVector = accountIcon, contentDescription = "Account",
-                                    modifier = Modifier.scale(animatedIconScale))
-                            }
-                        }
-                    )
-                },
-                bottomBar = {
-                    BottomAppBar {
-                        IconButton(onClick = { selectedTab.value = Icons.Default.Home },
-                            modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Home, contentDescription = "Home",
-                                modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray)
-                        }
-                        IconButton(onClick = { selectedTab.value = Icons.Default.Search },
-                            modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Search, contentDescription = "Search",
-                                modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray)
-                        }
-                        Box(modifier = Modifier.weight(1f).padding(16.dp),
-                            contentAlignment = Alignment.Center) {
-                            IconButton(onClick = { selectedTab.value = Icons.Default.Add }) {
-                                Icon(Icons.Default.Add, contentDescription = "Add",
-                                    tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray)
-                            }
-                        }
-                        IconButton(onClick = { selectedTab.value = Icons.Default.PlayArrow },
-                            modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.PlayArrow, contentDescription = "User",
-                                modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray)
-                        }
-                        IconButton(onClick = { selectedTab.value = Icons.Default.Person },
-                            modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Person, contentDescription = "Settings",
-                                modifier = Modifier.size(26.dp),
-                                tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray)
-                        }
+    when {
+        isConnecting -> {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Connecting to I2P network...", style = MaterialTheme.typography.bodyMedium)
+                    connectionError?.let {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text("Error: $it", color = Color.Red, fontSize = 12.sp)
                     }
                 }
-            ) { innerPadding ->
-                Column(
-                    modifier = Modifier.fillMaxSize().padding(innerPadding),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    when (selectedTab.value) {
-                        Icons.Default.Home -> HomeScreen(
-                            isCommunity = showCustomHome,
-                            onOpenChat = { contact -> selectedContact = contact },
-                            onOpenCommunity = { community -> selectedCommunity = community }
+            }
+        }
+        connectionError != null -> {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Failed to connect", color = Color.Red)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(onClick = {
+                        retryKey++
+                    }) {
+                        Text("Retry")
+                    }
+                }
+            }
+        }
+        else -> {
+            if (showGuide) {
+                GuideDialog(
+                    step = guideStep,
+                    onContinue = {
+                        if (guideStep < 1) {
+                            guideStep++
+                        } else {
+                            showGuide = false
+                            markGuideSeen(context)
+                        }
+                    },
+                    onSkip = {
+                        showGuide = false
+                        markGuideSeen(context)
+                    }
+                )
+            }
+
+            if (selectedCommunity != null) {
+                CommunityScreen(
+                    community = selectedCommunity!!,
+                    onBack = { selectedCommunity = null },
+                    customization = communityCustomizationSettings
+                )
+            } else if (selectedContact != null) {
+                ChatScreen(
+                    contactId = selectedContact!!.b32Address,
+                    contactName = selectedContact!!.name,
+                    customizationSettings = chatCustomizationSettings,
+                    onBack = { selectedContact = null }
+                )
+            } else {
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    topBar = {
+                        TopAppBar(
+                            title = { Text("Anonymous") },
+                            actions = {
+                                IconButton(onClick = {
+                                    iconScale = 1.2f
+                                    coroutineScope.launch {
+                                        delay(200)
+                                        iconScale = 1f
+                                    }
+                                    if (accountIcon == Icons.Default.Person) {
+                                        showCustomHome = true
+                                        accountIcon = Icons.Default.Face
+                                    } else {
+                                        showCustomHome = false
+                                        accountIcon = Icons.Default.Person
+                                    }
+                                }) {
+                                    Icon(imageVector = accountIcon, contentDescription = "Account",
+                                        modifier = Modifier.scale(animatedIconScale))
+                                }
+                            }
                         )
-                        Icons.Default.Search -> SearchScreen()
-                        Icons.Default.Add -> PubblicScreen()
-                        Icons.Default.PlayArrow -> {
-                            if (showingAuthor) {
-                                AuthorScreen(onBack = { showingAuthor = false })
-                            } else {
-                                XScreen(onSwipeRight = { showingAuthor = true })
+                    },
+                    bottomBar = {
+                        BottomAppBar {
+                            IconButton(onClick = { selectedTab.value = Icons.Default.Home },
+                                modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Home, contentDescription = "Home",
+                                    modifier = Modifier.size(26.dp),
+                                    tint = if (selectedTab.value == Icons.Default.Home) Color.White else Color.DarkGray)
+                            }
+                            IconButton(onClick = { selectedTab.value = Icons.Default.Search },
+                                modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Search, contentDescription = "Search",
+                                    modifier = Modifier.size(26.dp),
+                                    tint = if (selectedTab.value == Icons.Default.Search) Color.White else Color.DarkGray)
+                            }
+                            Box(modifier = Modifier.weight(1f).padding(16.dp),
+                                contentAlignment = Alignment.Center) {
+                                IconButton(onClick = { selectedTab.value = Icons.Default.Add }) {
+                                    Icon(Icons.Default.Add, contentDescription = "Add",
+                                        tint = if (selectedTab.value == Icons.Default.Add) Color.White else Color.Gray)
+                                }
+                            }
+                            IconButton(onClick = { selectedTab.value = Icons.Default.PlayArrow },
+                                modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = "User",
+                                    modifier = Modifier.size(26.dp),
+                                    tint = if (selectedTab.value == Icons.Default.PlayArrow) Color.White else Color.DarkGray)
+                            }
+                            IconButton(onClick = { selectedTab.value = Icons.Default.Person },
+                                modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Person, contentDescription = "Settings",
+                                    modifier = Modifier.size(26.dp),
+                                    tint = if (selectedTab.value == Icons.Default.Person) Color.White else Color.DarkGray)
                             }
                         }
-                        Icons.Default.Person -> SettingsScreen()
+                    }
+                ) { innerPadding ->
+                    Column(
+                        modifier = Modifier.fillMaxSize().padding(innerPadding),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        when (selectedTab.value) {
+                            Icons.Default.Home -> HomeScreen(
+                                isCommunity = showCustomHome,
+                                onOpenChat = { contact -> selectedContact = contact },
+                                onOpenCommunity = { community -> selectedCommunity = community }
+                            )
+                            Icons.Default.Search -> SearchScreen()
+                            Icons.Default.Add -> PubblicScreen()
+                            Icons.Default.PlayArrow -> {
+                                if (showingAuthor) {
+                                    AuthorScreen(onBack = { showingAuthor = false })
+                                } else {
+                                    XScreen(onSwipeRight = { showingAuthor = true })
+                                }
+                            }
+                            Icons.Default.Person -> SettingsScreen()
+                        }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+fun GuideDialog(
+    step: Int,
+    onContinue: () -> Unit,
+    onSkip: () -> Unit
+) {
+    val steps = 2
+    val isLastStep = step == steps - 1
+
+    AlertDialog(
+        onDismissRequest = onSkip,
+        title = {
+            Text(
+                text = when (step) {
+                    0 -> "Switch Chats & Communities"
+                    else -> "Add Your First Contact"
+                },
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    repeat(steps) { i ->
+                        Box(
+                            modifier = Modifier
+                                .size(if (i == step) 10.dp else 8.dp)
+                                .background(
+                                    color = if (i == step) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
+                                    shape = CircleShape
+                                )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Icon(
+                    imageVector = when (step) {
+                        0 -> Icons.Default.Person
+                        else -> Icons.Default.Add
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(50.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = when (step) {
+                        0 -> "Tap the icon in the top-right corner to toggle between your Chats list and your Communities.\n\n" +
+                                "The icon changes — 👤 for Chats, 🙂 for Communities"
+                        else -> "Tap the ＋ button in the bottom-right corner to add a new " +
+                                "contact.\n\nAsk your friend to share their QR code, then scan it.\n" +
+                                "Once added, just tap their name to start messaging Anonymously."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    textAlign = TextAlign.Center
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onContinue) { Text(if (isLastStep) "Done" else "Continue") }
+        },
+        dismissButton = {
+            TextButton(onClick = onSkip) { Text("Skip") }
+        }
+    )
 }
