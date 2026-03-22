@@ -13,7 +13,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,16 +29,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
-import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -60,13 +55,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.anonymous.datastore.ChatCustomizationSettings
@@ -81,7 +73,15 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.GifDecoder
@@ -94,10 +94,56 @@ import com.example.anonymous.utils.LinkifyText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-sealed class IconType(val action: (String) -> String) {
-    data class Vector(val icon: ImageVector, val activeMarker: String, val vectorAction: (String) -> String) : IconType(vectorAction)
-    data class Drawable(val resId: Int, val drawableAction: (String) -> String) : IconType(drawableAction)
+// Editor
+enum class EditorFormat(
+    val prefix: String,
+    val suffix: String,
+    val placeholder: String = ""
+) {
+    BOLD(prefix = "**", suffix = "**", placeholder = "bold"),
+    ITALIC(prefix = "_", suffix = "_", placeholder = "italic"),
+    STRIKETHROUGH(prefix = "~~", suffix = "~~", placeholder = "strikethrough"),
+    INLINE_CODE(prefix = "`", suffix = "`", placeholder = "code"),
+    CODE_BLOCK(prefix = "```\n", suffix = "\n```", placeholder = "code here")
 }
+
+fun applyFormat(value: TextFieldValue, format: EditorFormat): TextFieldValue {
+    val text = value.text
+    val selection = value.selection
+    val start = selection.min
+    val end = selection.max
+    val hasSelection = !selection.collapsed
+
+    val alreadyWrapped = hasSelection
+            && start >= format.prefix.length
+            && end + format.suffix.length <= text.length
+            && text.substring(start - format.prefix.length, start) == format.prefix
+            && text.substring(end, end + format.suffix.length) == format.suffix
+
+    return when {
+        alreadyWrapped -> {
+            val unwrapped = text.removeRange(end, end + format.suffix.length).removeRange(start - format.prefix.length, start)
+            val newStart = start - format.prefix.length
+            value.copy(text = unwrapped, selection = TextRange(newStart, newStart + (end -start)))
+        }
+        hasSelection -> {
+            val inner = text.substring(start, end)
+            val newText = text.replaceRange(start, end, "${format.prefix}$inner${format.suffix}")
+            val selStart = start + inner.length
+            val selEnd = selStart + inner.length
+            value.copy(text = newText, selection = TextRange(selStart, selEnd))
+        }
+        else -> {
+            val insert  = "${format.prefix}${format.placeholder}${format.suffix}"
+            val newText = text.replaceRange(start, start, insert)
+            val selStart = start + format.prefix.length
+            val selEnd   = selStart + format.placeholder.length
+            value.copy(text = newText, selection = TextRange(selStart, selEnd))
+        }
+    }
+}
+
+private fun String.isCodeBlock() = startsWith("```") && endsWith("```") && length > 6
 
 private fun connectionStatusInfo(connectionStatus: I2pdDaemon.DaemonState, isConnected: Boolean): Pair<String, Color> = when(connectionStatus) {
     I2pdDaemon.DaemonState.Idle -> "I2P Idle" to Color.Gray
@@ -123,14 +169,14 @@ fun ChatScreen(
     val offlineManager = remember { OfflineMessageManager.getInstance(context) }
     val contactRepository = remember { ContactRepository.getInstance(context) }
     val mediaManager = remember { MediaChunkManager.getInstance(context) }
-    var selectedUri by remember { mutableStateOf<Uri?>(null) }
 
     val currentUserId = remember { contactRepository.getMyIdentity()?.b32Address ?: PrefsHelper.getUserUuid(context) ?: "" }
 
     var messages by remember { mutableStateOf(emptyList<Message>()) }
-    var message by remember { mutableStateOf("") }
+    // TextField
+    var fieldValue by remember { mutableStateOf(TextFieldValue("")) }
     var isLoading by remember { mutableStateOf(false) }
-    var isCodeFormat by remember { mutableStateOf(false) }
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
     val coroutineScope = rememberCoroutineScope()
 
     val connectionState by messageManager.connectionState.collectAsState()
@@ -142,27 +188,6 @@ fun ChatScreen(
         MessageManager.ConnectionState.Disconnected -> I2pdDaemon.DaemonState.Idle
     }
 
-    val iconList = listOf(
-        IconType.Vector(Icons.Default.Favorite, activeMarker = "❤️") { text ->
-            if (text.startsWith("❤️") && text.endsWith("❤️")) text.removeSurrounding("❤️ ", " ❤️")
-            else "❤️ $text ❤️"
-        },
-        IconType.Vector(Icons.Default.Face, activeMarker = "😊") { text ->
-            if (text.startsWith("😊") && text.endsWith("😊")) text.removeSurrounding("😊 ", " 😊")
-            else "😊 $text 😊"
-        },
-        IconType.Vector(Icons.Default.PlayArrow, activeMarker = "▶️") { text ->
-            if (text.startsWith("▶️ ")) text.removePrefix("▶️ ")
-            else "▶️ $text"
-        },
-        IconType.Drawable(R.drawable.code_24px) { text ->
-            if (text.startsWith("```") && text.endsWith("```")) text.removeSurrounding("```")
-            else "```\n$text\n```"
-        }
-    )
-
-    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? -> selectedUri = uri }
-
     val gifLoader = remember(context.applicationContext) {
         ImageLoader.Builder(context.applicationContext)
             .components {
@@ -172,22 +197,18 @@ fun ChatScreen(
             .build()
     }
 
+    val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> selectedUri = uri }
+
     // Load messages on start
     LaunchedEffect(contactId) {
-        val stored = withContext(Dispatchers.IO) {
-            messageRepository.getMessagesForContact(contactId)
-        }
-        messages = stored
+        messages = withContext(Dispatchers.IO) { messageRepository.getMessagesForContact(contactId) }
     }
 
     // Listen for incoming I2P messages
-    LaunchedEffect(messageManager) {
+    LaunchedEffect(messageManager, contactId) {
         messageManager.incomingMessages.collect { newMessage ->
             if (newMessage.senderId == contactId || newMessage.receiverId == contactId) {
-                val updated = withContext(Dispatchers.IO) {
-                    messageRepository.getMessagesForContact(contactId)
-                }
-                messages = updated
+                messages = withContext(Dispatchers.IO) { messageRepository.getMessagesForContact(contactId) }
             }
         }
     }
@@ -288,67 +309,41 @@ fun ChatScreen(
                         .fillMaxWidth()
                         .padding(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .height(50.dp)
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState())
-                            .padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        iconList.forEach { icon ->
-                            IconButton(onClick = {
-                                message = icon.action(message)
-                                if (icon is IconType.Drawable && icon.resId == R.drawable.code_24px) {
-                                    isCodeFormat = !isCodeFormat
-                                }
-                            }) {
-                                when (icon) {
-                                    is IconType.Vector -> Icon(
-                                        imageVector = icon.icon,
-                                        contentDescription = null,
-                                        tint = if (message.contains(icon.icon.name)) Color.White else Color.DarkGray
-                                    )
-                                    is IconType.Drawable -> Icon(
-                                        painter = painterResource(id = icon.resId),
-                                        contentDescription = null,
-                                        tint = if (isCodeFormat) Color.White else Color.DarkGray
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    EditorToolbar(
+                        fieldValue = fieldValue,
+                        onValueChange = { fieldValue = it }
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    val isCodeBlock = fieldValue.text.isCodeBlock()
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = { mediaPicker.launch("image/*") }) {
-                            Icon(Icons.Default.AttachFile, contentDescription = "Attach image", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Icon(Icons.Default.AttachFile, contentDescription = "Attach", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
 
                         BasicTextField(
-                            value = message,
-                            onValueChange = { message = it },
+                            value = fieldValue,
+                            onValueChange = { fieldValue = it },
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(4.dp)
                                 .background(
-                                    if (isCodeFormat) Color.LightGray.copy(alpha = 0.2f)
+                                    color = if (isCodeBlock) MaterialTheme.colorScheme.surfaceVariant
                                     else Color.Transparent,
-                                    RoundedCornerShape(8.dp)
+                                    shape = RoundedCornerShape(8.dp)
                                 )
                                 .padding(8.dp),
                             textStyle = MaterialTheme.typography.bodyMedium.copy(
                                 color = MaterialTheme.colorScheme.onSurface,
-                                fontFamily = if (isCodeFormat) MaterialTheme.typography.bodyMedium.fontFamily else null
+                                fontFamily = if (isCodeBlock) FontFamily.Monospace else FontFamily.Default
                             ),
                             decorationBox = { inner ->
                                 Box {
-                                    if (message.isEmpty()) {
-                                        Text(
-                                            if (isCodeFormat) "Type your code..." else "Type a message...",
-                                            style = MaterialTheme.typography.bodyMedium.copy(
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        )
+                                    if (fieldValue.text.isEmpty()) {
+                                        Text("Type a message…",
+                                            style = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant))
                                     }
                                     inner()
                                 }
@@ -359,7 +354,7 @@ fun ChatScreen(
 
                         IconButton(
                             onClick = {
-                                val text = message.trim()
+                                val text = fieldValue.text.trim()
                                 val uri = selectedUri
                                 if (!isLoading && (text.isNotBlank() || uri != null)) {
                                     if (uri != null && !isConnected) {
@@ -372,36 +367,29 @@ fun ChatScreen(
                                             if (uri != null) {
                                                 val result = messageManager.sendMedia(contactId, uri, text)
                                                 if (result.isSuccess) {
-                                                    val updated = withContext(Dispatchers.IO) { messageRepository.getMessagesForContact(contactId) }
-                                                    messages = updated
-                                                    message = ""
+                                                    messages = withContext(Dispatchers.IO) { messageRepository.getMessagesForContact(contactId) }
+                                                    fieldValue = TextFieldValue("")
                                                     selectedUri = null
-                                                    isCodeFormat = false
-                                                    Log.d("ChatScreen", "Media sent successfully")
+                                                    Log.d("ChatScreen", "Media sent")
                                                 } else {
                                                     Log.w("ChatScreen", "sendMedia failed: ${result.exceptionOrNull()?.message}")
-                                                    Toast.makeText(context, "Failed to send image - may be too large after compression", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "Failed to send image", Toast.LENGTH_SHORT).show()
                                                 }
                                             } else {
                                                 val result = messageManager.sendMessage(contactId, text)
                                                 if (result.isSuccess) {
-                                                    val updated = withContext(Dispatchers.IO) {
-                                                        messageRepository.getMessagesForContact(contactId)
-                                                    }
-                                                    messages = updated
-                                                    message = ""
-                                                    isCodeFormat = false
-                                                    Log.d("ChatScreen", "Message sent successfully via I2P")
+                                                    messages = withContext(Dispatchers.IO) { messageRepository.getMessagesForContact(contactId) }
+                                                    fieldValue = TextFieldValue("")
+                                                    Log.d("ChatScreen", "Message sent via I2P")
                                                 } else {
-                                                    Log.w("ChatScreen", "I2P send failed, queuing for offline: ${result.exceptionOrNull()?.message}")
+                                                    Log.w("ChatScreen", "I2P failed, queuing: ${result.exceptionOrNull()?.message}")
                                                     val queuedId = offlineManager.queueMessage(contactId, text)
-                                                    Log.d("ChatScreen", "Message queued for offline delivery: $queuedId")
-                                                    message = ""
-                                                    isCodeFormat = false
+                                                    Log.d("ChatScreen", "Queued: $queuedId")
+                                                    fieldValue = TextFieldValue("")
                                                     Toast.makeText(context, "Message Queued", Toast.LENGTH_SHORT).show()
                                                 }
                                             }
-                                        } catch (e : Exception) {
+                                        } catch (e: Exception) {
                                             Log.e("ChatScreen", "Error sending", e)
                                         } finally {
                                             isLoading = false
@@ -409,17 +397,120 @@ fun ChatScreen(
                                     }
                                 }
                             },
-                            enabled = !isLoading && (message.isNotBlank() || selectedUri != null)
+                            enabled = !isLoading && (fieldValue.text.isNotBlank() || selectedUri != null)
                         ) {
-                            if (isLoading) {
-                                CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                            } else {
-                                Icon(Icons.Default.Send, contentDescription = "Send")
-                            }
+                            if (isLoading) CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                            else Icon(Icons.Default.Send, contentDescription = "Send")
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+// Editor Toolbar
+@Composable
+private fun EditorToolbar(
+   fieldValue: TextFieldValue,
+   onValueChange: (TextFieldValue) -> Unit
+) {
+    val text = fieldValue.text
+    val select = fieldValue.selection
+
+    fun isActive(format: EditorFormat): Boolean {
+        if (select.collapsed) return false
+        val s = select.min; val e = select.max
+        return s >= format.prefix.length
+                && e + format.suffix.length <= text.length
+                && text.substring(s - format.prefix.length, s) == format.prefix
+                && text.substring(e, e + format.suffix.length) == format.suffix
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        EditorTextButton(label = "B", active = isActive(EditorFormat.BOLD), fontWeight = FontWeight.Bold) {
+            onValueChange(applyFormat(fieldValue, EditorFormat.BOLD))
+        }
+        EditorTextButton(label = "I", active = isActive(EditorFormat.ITALIC), fontStyle = FontStyle.Italic) {
+            onValueChange(applyFormat(fieldValue, EditorFormat.ITALIC))
+        }
+        EditorTextButton(label = "S", active = isActive(EditorFormat.STRIKETHROUGH), textDecoration = TextDecoration.LineThrough) {
+            onValueChange(applyFormat(fieldValue, EditorFormat.STRIKETHROUGH))
+        }
+
+        Box(modifier = Modifier.width(1.dp).height(20.dp).background(MaterialTheme.colorScheme.outlineVariant))
+
+        EditorIconButton(
+            resId = R.drawable.code_24px,
+            active = isActive(EditorFormat.INLINE_CODE),
+            contentDescription = "Inline code"
+        ) { onValueChange(applyFormat(fieldValue, EditorFormat.INLINE_CODE)) }
+
+        EditorTextButton(
+            label = "</>",
+            active = text.isCodeBlock()
+        ) { onValueChange(applyFormat(fieldValue, EditorFormat.CODE_BLOCK)) }
+    }
+}
+
+@Composable
+private fun EditorTextButton(
+    label: String,
+    active: Boolean,
+    fontWeight: FontWeight = FontWeight.Normal,
+    fontStyle: FontStyle = FontStyle.Normal,
+    textDecoration: TextDecoration = TextDecoration.None,
+    onClick: () -> Unit
+) {
+    val primary = MaterialTheme.colorScheme.primary
+    val onSurface = MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(6.dp),
+        color = if (active) primary.copy(alpha = 0.15f) else Color.Transparent,
+        modifier = Modifier.size(36.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = fontWeight,
+                    fontStyle = fontStyle,
+                    textDecoration = textDecoration,
+                    color = if (active) primary else onSurface,
+                    fontSize = 14.sp
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun EditorIconButton(
+    resId: Int,
+    active: Boolean,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    val primary   = MaterialTheme.colorScheme.primary
+    val onSurface = MaterialTheme.colorScheme.onSurfaceVariant
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(6.dp),
+        color = if (active) primary.copy(alpha = 0.15f) else Color.Transparent,
+        modifier = Modifier.size(36.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                painter = painterResource(id = resId),
+                contentDescription = contentDescription,
+                tint = if (active) primary else onSurface,
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }
